@@ -1,0 +1,13 @@
+{
+  "stage": 1,
+  "name": "빈 경로 — 액터 없음, 신호 항상 녹색",
+  "signals": "always_green",
+  "boards": [
+    {"name": "course_A", "route": "routes/HL_FMA_NEW_A.json", "lane": "routes/HL_FMA_NEW_A_lane.json"},
+    {"name": "course_B", "route": "routes/HL_FMA_NEW_B.json", "lane": "routes/HL_FMA_NEW_B_lane.json"},
+    {"name": "course_D", "route": "routes/HL_FMA_NEW_D.json", "lane": "routes/HL_FMA_NEW_D_lane.json"},
+    {"name": "course_E", "route": "routes/HL_FMA_NEW_E.json", "lane": "routes/HL_FMA_NEW_E_lane.json"},
+    {"name": "course_G", "route": "routes/HL_FMA_NEW_G.json", "lane": "routes/HL_FMA_NEW_G_lane.json"},
+    {"name": "course_H", "route": "routes/HL_FMA_NEW_H.json", "lane": "routes/HL_FMA_NEW_H_lane.json"}
+  ]
+}
