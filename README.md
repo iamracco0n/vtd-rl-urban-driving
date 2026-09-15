@@ -24,6 +24,13 @@ ROS2 `setup.bash` 를 source 한 셸은 `PYTHONPATH` 에 `/opt/ros/humble/...` �
 `env -u PYTHONPATH` 로 그 변수만 빼고 돌린다(ROS2 를 source 하지 않은 셸은 `.venv/bin/pytest` 만으로 된다).
 단계 ① 완주 테스트(`slow`, 판 6개를 끝까지 달린다)도 기본으로 함께 돈다 — 전체 1 분 안쪽.
 
+## 온라인 심판
+`vtd_rl/referee` 는 주행 한 판을 한 프레임씩 받아 대회 채점기(`score_fma.py`)와 같은 감점 판정을 낸다.
+채점기가 뒤 프레임을 보는 항목(녹색 정차, 보행자, 차로 유지, 차로변경 지시등)은 그만큼, 최대 8 초 늦게 낸다.
+일치 검증 결과: [docs/reports/m2a-referee-parity.md](docs/reports/m2a-referee-parity.md)
+
+    env -u PYTHONPATH .venv/bin/python scripts/referee_parity_report.py
+
 ## M1 성적표 다시 만들기
 [docs/reports/m1-stage1-teacher.md](docs/reports/m1-stage1-teacher.md) 는 아래 두 줄로 만든다
 (스텝 속도를 먼저 재고, 그 JSON 을 넘겨 단계 ① 판을 달린다. 주행 CSV 는 `runs/m1/` 에 남고 커밋하지 않는다).
