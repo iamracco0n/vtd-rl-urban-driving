@@ -7,6 +7,7 @@
 - 코스 G 2575~2841 m: 교차로 없는 구간, 왼쪽에 같은 방향 차로(l≈4.5).
 대본 수치는 기대 항목이 일어나도록 조정해도 된다. 채점기·심판·월드 문턱은 바꾸지 않는다.
 """
+import copy
 import functools
 import math
 from dataclasses import dataclass
@@ -44,7 +45,12 @@ def _slice(letter, s0, s1, signals="always_green"):
 
 
 def _script(speed, offset=None, signal=None):
-    return lambda b: ScriptedDriver(b, speed, offset or Offset(0.0), signal or SignalWindow(0, 0, 0))
+    # StopAt 은 상태를 갖는 one-shot 이다(_since/_done) — make_driver 를 두 번 부르면
+    # (episode_rows 캐시된 Scenario 에 대해 진단하려고 직접 다시 돌릴 때 등) 같은 인스턴스를
+    # 재사용해 이미 소진된 상태로 시작한다. 호출마다 깊은 복사로 새 일정을 준다.
+    return lambda b: ScriptedDriver(b, copy.deepcopy(speed),
+                                    copy.deepcopy(offset) or Offset(0.0),
+                                    copy.deepcopy(signal) or SignalWindow(0, 0, 0))
 
 
 def _route_point(board, s, lateral):
