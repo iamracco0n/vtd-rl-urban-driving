@@ -1,10 +1,15 @@
+import os
+
+import pytest
+
 from vtd_rl import rule_stack as rs
 from vtd_rl.rollout import run_teacher_episode
 from vtd_rl.teacher.shadow import ShadowTeacher
-from vtd_rl.world.board import load_board, slice_board
+from vtd_rl.world.board import load_board, load_curriculum, slice_board
 from vtd_rl.world.world import World
 
 H = {"name": "course_H", "route": "routes/HL_FMA_NEW_H.json", "lane": "routes/HL_FMA_NEW_H_lane.json"}
+STAGE1 = os.path.join(os.path.dirname(__file__), "..", "curricula", "stage1.json")
 
 
 def h_slice():
@@ -49,3 +54,11 @@ def test_한_판_달리기와_CSV(tmp_path):
     lines = csv.read_text(encoding="utf-8").splitlines()
     assert lines[0] + "\n" == rs.HEADER
     assert len(lines) - 1 == r.steps
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("board", load_curriculum(STAGE1)[1], ids=lambda b: b.name)
+def test_선생님은_단계1_판을_완주한다(board):
+    # 설계 §8.1 — 선생님이 world 에서 단계 ① 판을 완주하지 못하면 world 가 틀린 것이다
+    r = run_teacher_episode(board)
+    assert r.outcome == "goal", f"{board.name}: {r.outcome} · {r.distance:.0f}/{board.route.total:.0f} m · {r.sim_time:.1f} s"
