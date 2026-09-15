@@ -26,7 +26,9 @@ ROS2 `setup.bash` 를 source 한 셸은 `PYTHONPATH` 에 `/opt/ros/humble/...` �
 
 ## 온라인 심판
 `vtd_rl/referee` 는 주행 한 판을 한 프레임씩 받아 대회 채점기(`score_fma.py`)와 같은 감점 판정을 낸다.
-채점기가 뒤 프레임을 보는 항목(녹색 정차, 보행자, 차로 유지, 차로변경 지시등)은 그만큼, 최대 8 초 늦게 낸다.
+판정 시점: ①②⑥⑦⑨⑪⑭⑮ 는 그 프레임에, ④⑤⑫ 는 위반이 최소 시간에 닿는 프레임에 낸다.
+③ 은 최소 시간에 닿고 2.5 초 뒤, ⑩ 은 1 초 뒤, ⑬ 은 최대 8 초 뒤에 낸다.
+⑧ 은 정차가 끝날 때 낸다(등급과 면책을 정차 전체로 정한다).
 일치 검증 결과: [docs/reports/m2a-referee-parity.md](docs/reports/m2a-referee-parity.md)
 
     env -u PYTHONPATH .venv/bin/python scripts/referee_parity_report.py

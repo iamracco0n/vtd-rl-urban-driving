@@ -1,7 +1,10 @@
 """⑦ 적색 정지 · ⑧ 녹색 무의미 정차 · ⑨ 적색점멸 — score_fma.item_traffic_light 의 한 행 판.
 
-⑦⑨ 는 (신호, 상태)마다 선을 처음 넘는 프레임에 확정한다. 채점기는 판 끝에 보므로, 같은 (신호, 상태)로
-다시 다가가 서는 드문 경우만 답이 다르다(M2a 계획 Global Constraints).
+⑦⑨ 는 (신호, 상태)마다 선을 처음 넘는 프레임에 확정한다. 채점기는 판 끝에 '그 (신호, 상태)에서 한 번이라도
+정지선 앞에 섰나'를 보므로, 선을 넘은 뒤 같은 (신호, 상태)로 다시 정지선 앞에 서게 되면 답이 다르다
+(M2a 계획 Global Constraints). 다시 다가가 서는 경우만이 아니다 — 정지선 앞에 서 있는 동안 리스폰 순간이동이
+선 너머로 튀었다 돌아오면, 심판은 넘는 프레임에 확정하고 채점기는 돌아와 선 것으로 면책한다.
+오프라인 세계는 리스폰하지 않지만 VTD 는 한다.
 ⑧ 은 정차 구간이 닫힐 때 낸다(SpanTracker close). 등급(GREEN_MAJOR 이상이면 중대)과 두 면책
 (객체 근거·LAWFUL_WAIT 가 구간의 과반)이 구간 전체를 봐야 정해지므로 ④⑤⑫ 처럼 최소 시간에 닿을 때 낼 수 없다.
 """
@@ -63,6 +66,7 @@ class TrafficLightJudge:
         else:
             self.stopped_since.pop(key, None)
             self.far_stopped_since.pop(key, None)
+        # -1.0: item_traffic_light 안의 숫자 — 앞범퍼가 선을 이만큼 지나야 '넘었다'[m]
         if not (fwd < -1.0 and self.ahead.get(key)) or key in self.crossed:
             return []
         self.crossed.add(key)

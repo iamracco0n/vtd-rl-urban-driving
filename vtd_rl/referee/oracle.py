@@ -52,7 +52,7 @@ def match_inputs(board) -> MatchInputs:
     route = [list(p) for p in board.route.pts]
     lims = [p.get("lim") for p in board.lane_plan]
     lc_flag = [bool(p[4]) if len(p) > 4 else False for p in board.ego_lanes]
-    cws = [c for c in _json("routes/crosswalks.json")["crosswalks"]
+    cws = [c for c in _json("routes/crosswalks.json")["crosswalks"]      # default=99·6.0: score_fma.main 안의 숫자[m]
            if min((math.hypot(p[0] - c["x"], p[1] - c["y"]) for p in route), default=99) < 6.0]
     return MatchInputs(route, lims, lc_flag, _json("routes/tl_map_livinglab.json"), cws)
 

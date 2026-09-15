@@ -115,6 +115,11 @@ class Referee:
         return hits
 
     def step(self, row):
+        """한 프레임을 판정하고 이번에 낸 Hit 목록을 돌려준다.
+
+        row 사전은 심판이 가져간다: 지도 판정(classify)이 제자리에서 키를 붙이고, 판정기들은 늦게
+        내려고 행을 참조로 들고 있다. 부르는 쪽은 프레임마다 새 사전을 넘기고 넘긴 뒤 고치지 않는다.
+        """
         if self.map is not None:
             rs.check_lanes.classify([row], self.map)
         out = []

@@ -19,6 +19,22 @@ from vtd_rl.rollout import run_episode  # noqa: E402
 from vtd_rl.world.board import load_curriculum  # noqa: E402
 
 
+# 대본 판·선생님 코스에서 안 일어나는 항목을 대신 검증하는 합성 행 테스트
+SYNTHETIC_TESTS = {6: "tests/referee/test_lane_geometry_synthetic.py",
+                   15: "tests/referee/test_turn_signal_online.py"}
+
+
+def circled(item):
+    return chr(0x2460 + item - 1)
+
+
+def never_text(never):
+    if not never:
+        return "없음"
+    cited = [f"{circled(i)} 는 {SYNTHETIC_TESTS[i]}" for i in never if i in SYNTHETIC_TESTS]
+    return f"{never}" + (f" ({', '.join(cited)} 합성 행으로 검증)" if cited else "")
+
+
 def items_text(counter):
     by = collections.Counter()
     for (_sec, item, level), n in counter.items():
@@ -51,7 +67,7 @@ def main():
         "- 일치: 한 판에서 `(구간, 항목, 등급)` 감점 호출 다중집합, 리스폰 사전, 구간별 최종 감점표가 모두 같다(구간 5개)",
         "- 표기: 항목번호 + M(중대)/m(경미) × 호출 횟수",
         f"- 채점기가 한 번이라도 일으킨 항목: {sorted(fired)}",
-        f"- 한 번도 일어나지 않은 항목: {never or '없음'} (⑮ 는 tests/referee/test_turn_signal_online.py 합성 행으로 검증)",
+        f"- 한 번도 일어나지 않은 항목: {never_text(never)}",
         f"- 심판 평균 {seconds / max(frames, 1) * 1e6:.0f} µs/프레임(지도 판정 포함, {frames} 프레임)", "",
         "| 판 | 설명 | 기대 항목 | 채점기 | 심판 | 일치 | µs/프레임 |",
         "|---|---|---|---|---|---|---:|",

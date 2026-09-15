@@ -29,7 +29,7 @@ class PedestrianJudge:
                 continue
             if not (0.0 <= fx <= sf.FRONT + sf.PED_NEAR):
                 continue
-            if not (0.3 <= sp <= 2.5):
+            if not (0.3 <= sp <= 2.5):          # item_pedestrian 안의 숫자 — 보행 속도 범위[m/s]
                 continue
             if abs(fy) <= sf.PED_NEAR:
                 return fy
