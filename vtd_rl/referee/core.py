@@ -68,10 +68,12 @@ def default_judges(use_map):
     from vtd_rl.referee.judges.pedestrian import PedestrianJudge
     from vtd_rl.referee.judges.speed import SpeedJudge
     from vtd_rl.referee.judges.traffic_light import TrafficLightJudge
+    from vtd_rl.referee.judges.turn_signal import RespawnJudge, TurnSignalJudge
     judges = [SpeedJudge]
     if use_map:
         judges.append(LaneGeometryJudge)
-    return judges + [TrafficLightJudge, ContactJudge, PedestrianJudge, CrosswalkStopJudge]
+    return judges + [TrafficLightJudge, ContactJudge, PedestrianJudge, CrosswalkStopJudge,
+                     TurnSignalJudge, RespawnJudge]
 
 
 class Referee:
