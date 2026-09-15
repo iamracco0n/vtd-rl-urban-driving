@@ -1,6 +1,7 @@
 import pytest
 
 from vtd_rl import rule_stack as rs
+from vtd_rl.world import dynamics as dyn
 from vtd_rl.world.board import Board
 from vtd_rl.world.signals import RouteSignal
 from vtd_rl.world.world import World, WorldConfig
@@ -57,6 +58,27 @@ def test_도로_이탈():
     info = drive(w, 0.6, 2.0, 20.0)
     assert info.outcome == "offroad"
     assert info.lateral > 1.75 + 1.5
+
+
+def test_도로_이탈_폭은_합법과_물리_중_넓은_쪽():
+    # 규칙 스택 _phys_room 과 같이 그쪽 여유 = max(합법 l/r, 물리 pl/pr)
+    b = straight_board()
+    for p in b.lane_plan:
+        p.update(l=5.0, pl=1.0, r=4.0, pr=2.0)
+    b.lane_plan[30] = dict(b.lane_plan[30], l=None, pl=0.0, r=None, pr=None)   # 둘 다 없으면 1.75
+
+    def outcome_at(x, y):
+        w = World(b, signals=[])
+        w.reset()
+        w.ego = dyn.EgoState(x, y, 0.0)
+        return w.step(0.0, 0.0, 0)[1].outcome
+
+    assert outcome_at(20.0, 6.0) == "running"         # 왼쪽 5.0 + 1.5 = 6.5 안 (pl 1.0 로 보면 이탈)
+    assert outcome_at(20.0, 6.8) == "offroad"
+    assert outcome_at(20.0, -5.0) == "running"        # 오른쪽 4.0 + 1.5 = 5.5 안 (pr 2.0 로 보면 이탈)
+    assert outcome_at(20.0, -5.8) == "offroad"
+    assert outcome_at(30.0, 3.0) == "running"         # 1.75 + 1.5 = 3.25
+    assert outcome_at(30.0, -3.5) == "offroad"
 
 
 def test_시간_초과():
