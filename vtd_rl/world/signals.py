@@ -13,6 +13,7 @@ SAME_DIR_DEG = 45.0      # 도색 정지선 방위와 경로 방위 차 허용[�
 MAX_LATERAL = 8.0        # 경로에서 이만큼 안의 정지선만[m]
 REPORT_RANGE = 150.0     # 이 앞까지 알린다[m] — VTD 실측 60~300 m 의 가운데쯤
 PASSED_MARGIN = 5.0      # 뒷축이 정지선을 이만큼 지날 때까지는 계속 알린다[m]
+NO_SIGNAL = 0            # 알릴 신호가 없을 때의 tl_id — VTD 는 -1 이 아니라 0 을 준다
 
 
 @dataclass(frozen=True)
@@ -75,11 +76,11 @@ class SignalReporter:
     def report(self, s_ego: float, index: int, t: float):
         plan = self.lane_plan[index] if 0 <= index < len(self.lane_plan) else None
         if plan and plan.get("j"):
-            return -1, rs.TL_UNSET
+            return NO_SIGNAL, rs.TL_UNSET
         for sig in self.signals:
             if sig.s + PASSED_MARGIN < s_ego:
                 continue
             if sig.s - s_ego <= REPORT_RANGE:
                 return sig.tl_id, self.programs[sig.tl_id].state(t)
             break
-        return -1, rs.TL_UNSET
+        return NO_SIGNAL, rs.TL_UNSET

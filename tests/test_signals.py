@@ -44,11 +44,13 @@ def test_알림_규칙():
     sig = [RouteSignal(100.0, 7)]
     lane = [{"j": 0}] * 150 + [{"j": 1}] * 10 + [None] * 40
     rep = SignalReporter(sig, lane, {7: SignalProgram()})
-    assert rep.report(100.0 - REPORT_RANGE - 1.0, 0, 0.0) == (-1, rs.TL_UNSET)   # 너무 멀다
+    # 신호가 없으면 VTD 처럼 tl_id 0 (규칙 스택 behavior 의 우회전 녹색 래치가 0 을 '신호 없음'으로 읽는다)
+    assert rep.report(100.0 - REPORT_RANGE - 1.0, 0, 0.0) == (0, rs.TL_UNSET)    # 너무 멀다
     assert rep.report(20.0, 20, 0.0) == (7, rs.TL_GREEN)
-    assert rep.report(97.0, 97, 0.0) == (7, rs.TL_GREEN)                         # 정지선 조금 지남
-    assert rep.report(155.0, 155, 0.0) == (-1, rs.TL_UNSET)                      # 교차로 안
-    assert rep.report(120.0, 120, 0.0) == (-1, rs.TL_UNSET)                      # 완전히 지남
+    assert rep.report(97.0, 97, 0.0) == (7, rs.TL_GREEN)                         # 정지선 3 m 앞
+    assert rep.report(103.0, 103, 0.0) == (7, rs.TL_GREEN)                       # 정지선 3 m 지남(PASSED_MARGIN 안)
+    assert rep.report(155.0, 155, 0.0) == (0, rs.TL_UNSET)                       # 교차로 안
+    assert rep.report(120.0, 120, 0.0) == (0, rs.TL_UNSET)                       # 완전히 지남
     assert rep.report(20.0, 190, 0.0) == (7, rs.TL_GREEN)                        # 차로계획 칸이 None
 
 

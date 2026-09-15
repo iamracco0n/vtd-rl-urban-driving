@@ -30,7 +30,7 @@ def test_리셋():
     w = World(straight_board(), signals=[])
     s = w.reset()
     assert (s.x, s.y, s.heading) == (0.0, 0.0, 0.0)
-    assert s.speed == 0.0 and s.tl_id == -1
+    assert s.speed == 0.0 and (s.tl_id, s.tl_state) == (0, rs.TL_UNSET)   # VTD 는 '신호 없음'을 0 으로 준다
     assert s.t == pytest.approx(1.0e9) and w.t == 0.0
 
 
