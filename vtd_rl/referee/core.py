@@ -63,9 +63,10 @@ class Context:
 
 
 def default_judges(use_map):
+    from vtd_rl.referee.judges.contact import ContactJudge, CrosswalkStopJudge
     from vtd_rl.referee.judges.speed import SpeedJudge
     from vtd_rl.referee.judges.traffic_light import TrafficLightJudge
-    return [SpeedJudge, TrafficLightJudge]
+    return [SpeedJudge, TrafficLightJudge, ContactJudge, CrosswalkStopJudge]
 
 
 class Referee:
