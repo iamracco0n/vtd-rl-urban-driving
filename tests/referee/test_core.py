@@ -31,6 +31,29 @@ def test_온라인_구간은_spans_와_같다():
             assert span_rows == [r for r in rows if t0 <= r["t"] <= t1]
 
 
+def test_reach_모드는_길이에_처음_닿는_행에서_한_번만_낸다():
+    rng = random.Random(4)
+    for _ in range(300):
+        min_sec = rng.choice([0.0, 0.3, 0.6, 1.0])
+        rows = [dict(t=round(k * 0.05, 2), on=rng.random() < 0.75) for k in range(rng.randint(0, 120))]
+        pred = lambda r: r["on"]
+        want = rs.score_fma.spans(rows, pred, min_sec)
+        close, reach = SpanTracker(pred, min_sec), SpanTracker(pred, min_sec, emit="reach")
+        closed, reached = [], []
+        for k, r in enumerate(rows):
+            closed += [k for _ in close.update(r)]
+            reached += [(k, s) for s in reach.update(r)]
+        closed += [len(rows) for _ in close.finish()]
+        assert reach.finish() == []
+        assert [(t0, r0) for _, (t0, _t1, r0, _) in reached] == [(t0, r0) for t0, _t1, r0 in want]
+        assert len(closed) == len(reached)
+        for k_close, (k, (t0, t1, _r0, span_rows)) in zip(closed, reached):
+            assert k < k_close
+            assert t1 == rows[k]["t"] and span_rows == [r for r in rows[:k + 1] if r["t"] >= t0]
+            assert t1 - t0 >= min_sec - 1e-9
+            assert len(span_rows) == 1 or span_rows[-2]["t"] - t0 < min_sec - 1e-9
+
+
 def test_심판은_항목15를_Sheet_대신_따로_모은다():
     class Fake:
         items = (1, 15)

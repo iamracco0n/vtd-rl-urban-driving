@@ -4,6 +4,10 @@
 - 출발 직후 제외: 첫 행에서 8 m 넘게 가고 |d_ego| < 0.5 인 첫 행부터 본다(원본의 live).
 - ⑥ 사건은 lane_change_events 를 [직전 행, 이 행] 에 불러 얻는다. 원본도 직전 행과만 비교한다.
 - ③ 은 행마다 '차로변경 사건 ±2.5 초 안인가'를 봐야 해서 행을 2.5 초 붙잡아 두었다가 구간 추적에 넣는다.
+- 판정 시점: ⑥ 은 사건 프레임, ④⑤ 는 침범이 최소 시간(CENTER_S·WALK_S)에 닿는 프레임에 낸다(끝을 기다리지 않는다).
+  ③ 은 풀려난 물림이 LANE_EDGE_S 에 닿는 행에서 그때까지 지나온 채점 구간마다 한 번씩(처음 본 순서) 내고,
+  같은 물림이 이어지는 동안 새 채점 구간에 처음 들어가면 그 행에서 한 번 더 낸다. 채점기도 물림 하나를
+  채점 구간마다 한 번씩 세므로 구간별 횟수와 등급이 같다.
 """
 import math
 from collections import deque
@@ -32,9 +36,10 @@ class LaneGeometryJudge:
         self.prev = None                 # lane_change_events 의 직전 행
         self.changes = deque()           # 차로변경 사건 시각
         self.held = deque()              # ③ 판정을 기다리는 행
-        self.edge = SpanTracker(self._edge_pred, sf.LANE_EDGE_S)
-        self.center = SpanTracker(_over("center_intrusion", sf.CENTER_M), sf.CENTER_S)
-        self.walk = SpanTracker(_over("sidewalk_intrusion", sf.WALK_M), sf.WALK_S)
+        self.edge = SpanTracker(self._edge_pred, sf.LANE_EDGE_S, emit="reach")
+        self.center = SpanTracker(_over("center_intrusion", sf.CENTER_M), sf.CENTER_S, emit="reach")
+        self.walk = SpanTracker(_over("sidewalk_intrusion", sf.WALK_M), sf.WALK_S, emit="reach")
+        self.edge_t0, self.edge_secs = None, set()    # 낸 ③ 물림의 시작 t · 그 물림에서 이미 낸 채점 구간
         self.n_edge, self.n_solid = {}, {}
 
     def _edge_pred(self, r):
@@ -63,7 +68,7 @@ class LaneGeometryJudge:
         if not self.live:
             return []
         out = self._release(lambda h: True)
-        out += self._edge_hits(self.edge.finish())
+        out += self._edge_spans(self.edge.finish())
         out += self._major_hits(4, self.center.finish())
         out += self._major_hits(5, self.walk.finish())
         return out
@@ -87,24 +92,35 @@ class LaneGeometryJudge:
     def _release(self, ready):
         out = []
         while self.held and ready(self.held[0]):
-            out += self._edge_hits(self.edge.update(self.held.popleft()))
+            out += self._edge_step(self.held.popleft())
         if self.held:
             oldest = self.held[0]["t"]
             while self.changes and self.changes[0] <= oldest - LC_WIN:
                 self.changes.popleft()
         return out
 
-    def _edge_hits(self, spans):
+    def _edge_step(self, r):
+        spans = self.edge.update(r)
+        if not spans and self.edge.reached:                   # 이미 낸 물림이 이어진다
+            return self._edge_hit(r)
+        return self._edge_spans(spans)
+
+    def _edge_spans(self, spans):
         out = []
-        for t0, t1, _r0, span_rows in spans:
-            first_by_sec = {}
+        for t0, _t1, _r0, span_rows in spans:
+            self.edge_t0, self.edge_secs = t0, set()
             for r in span_rows:
-                first_by_sec.setdefault(self.ctx.secs.of(r["x"], r["y"]), r)
-            for sec in first_by_sec:
-                self.n_edge[sec] = self.n_edge.get(sec, 0) + 1
-                out.append(Hit(t0, sec, 3, "major" if self.n_edge[sec] >= 2 else "minor",
-                               f"t={t0:.1f}~{t1:.1f} 차로 경계 물림"))
+                out += self._edge_hit(r)
         return out
+
+    def _edge_hit(self, r):
+        sec = self.ctx.secs.of(r["x"], r["y"])
+        if sec in self.edge_secs:
+            return []
+        self.edge_secs.add(sec)
+        self.n_edge[sec] = self.n_edge.get(sec, 0) + 1
+        return [Hit(self.edge_t0, sec, 3, "major" if self.n_edge[sec] >= 2 else "minor",
+                    f"t={self.edge_t0:.1f}~{r['t']:.1f} 차로 경계 물림")]
 
     def _major_hits(self, item, spans):
         return [Hit(t0, self.ctx.secs.of(r0["x"], r0["y"]), item, "major", f"t={t0:.1f}~{t1:.1f}")

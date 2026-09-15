@@ -1,4 +1,7 @@
-"""⑪ 장애물 충돌 · ⑭ 차량·보행자 접촉 · ⑫ 횡단보도 위 정지 — score_fma.item_contact, item_crosswalk_stop."""
+"""⑪ 장애물 충돌 · ⑭ 차량·보행자 접촉 · ⑫ 횡단보도 위 정지 — score_fma.item_contact, item_crosswalk_stop.
+
+⑪⑭ 은 그 프레임에, ⑫ 는 정지가 CW_STOP_S 에 닿는 프레임에 낸다(등급이 늘 경미라 정지가 끝나기를 기다리지 않는다).
+"""
 import math
 
 from vtd_rl import rule_stack as rs
@@ -38,7 +41,7 @@ class CrosswalkStopJudge:
 
     def __init__(self, ctx):
         self.ctx = ctx
-        self.span = SpanTracker(self._on_crosswalk, sf.CW_STOP_S)
+        self.span = SpanTracker(self._on_crosswalk, sf.CW_STOP_S, emit="reach")
 
     def _on_crosswalk(self, r):
         fx = r["x"] + sf.FRONT / 2 * math.cos(r["h"])     # 채점기가 쓰는 '차체 중앙쯤'
@@ -48,7 +51,7 @@ class CrosswalkStopJudge:
 
     def _hits(self, spans):
         return [Hit(t0, self.ctx.secs.of(r0["x"], r0["y"]), 12, "minor",
-                    f"t={t0:.1f}~{t1:.1f} 횡단보도 위 {t1-t0:.1f}초 정지")
+                    f"t={t0:.1f}~{t1:.1f} 횡단보도 위 {t1-t0:.1f}초째 정지")
                 for t0, t1, r0, _ in spans]
 
     def step(self, r):

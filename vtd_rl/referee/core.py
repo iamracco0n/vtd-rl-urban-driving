@@ -1,6 +1,6 @@
 """온라인 심판 뼈대.
 
-- SpanTracker: score_fma.spans() 를 한 행씩. 참이 이어지다 거짓 행이 오면 그 구간을 닫는다(길이 조건 같음).
+- SpanTracker: score_fma.spans() 를 한 행씩. 닫힐 때 내거나(close), 길이 조건에 닿는 행에서 낸다(reach).
 - Context: score_fma.main() 과 같은 보조 데이터(구간·제한속도·차로변경 표식·정지선·횡단보도).
 - Referee: 행마다 (지도 판정) -> 판정기들 -> Sheet 반영. 판정기는 미래 행을 보지 않고, 필요하면 늦게 낸다.
 """
@@ -23,21 +23,40 @@ class Hit:
 
 
 class SpanTracker:
-    def __init__(self, pred, min_sec):
-        self.pred, self.min_sec = pred, min_sec
+    """score_fma.spans() 를 한 행씩. 돌려주는 구간은 (t0, t1, 첫 행, 구간 행들).
+
+    emit="close": 구간이 닫힐 때(거짓 행·finish) 길이가 min_sec 이상이면 낸다. t1 = 마지막 참 행.
+    emit="reach": 길이 조건(spans 와 같은 식)이 처음 참이 되는 행에서 한 번 낸다. t1 = 그 행.
+      닫힐 때는 내지 않고, min_sec 에 못 미치고 닫힌 구간도 내지 않는다.
+      `reached` 는 지금 열린 구간을 이미 냈는지 — 그 뒤 행은 모으지 않는다.
+    """
+
+    def __init__(self, pred, min_sec, emit="close"):
+        if emit not in ("close", "reach"):
+            raise ValueError(f"emit={emit!r}")
+        self.pred, self.min_sec, self.emit = pred, min_sec, emit
         self._rows = []
+        self.reached = False
+
+    def _long(self, rows):
+        return bool(rows) and rows[-1]["t"] - rows[0]["t"] >= self.min_sec - 1e-9
 
     def _close(self):
-        rows, self._rows = self._rows, []
-        if rows and rows[-1]["t"] - rows[0]["t"] >= self.min_sec - 1e-9:
+        rows, self._rows, self.reached = self._rows, [], False
+        if self.emit == "close" and self._long(rows):
             return [(rows[0]["t"], rows[-1]["t"], rows[0], rows)]
         return []
 
     def update(self, row):
-        if self.pred(row):
-            self._rows.append(row)
+        if not self.pred(row):
+            return self._close()
+        if self.reached:
             return []
-        return self._close()
+        self._rows.append(row)
+        if self.emit == "reach" and self._long(self._rows):
+            self.reached = True
+            return [(self._rows[0]["t"], row["t"], self._rows[0], self._rows)]
+        return []
 
     def finish(self):
         return self._close()
