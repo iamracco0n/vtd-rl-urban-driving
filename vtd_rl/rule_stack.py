@@ -23,10 +23,14 @@ from scenario import Scenario, Actor  # noqa: E402
 from drive import DrivingStack, Command  # noqa: E402
 from run_logger import RunLogger, HEADER  # noqa: E402
 import mock_vtd  # noqa: E402
+import score_fma  # noqa: E402
+import check_lanes  # noqa: E402
+import control  # noqa: E402
 
 __all__ = ["ROOT", "path", "commit", "map_db", "State", "Obj", "VTDLink", "TL_UNSET", "TL_RED",
            "TL_YELLOW", "TL_GREEN", "TS_OFF", "TS_LEFT", "TS_RIGHT", "Scenario", "Actor",
-           "DrivingStack", "Command", "RunLogger", "HEADER", "mock_vtd"]
+           "DrivingStack", "Command", "RunLogger", "HEADER", "mock_vtd", "score_fma", "check_lanes",
+           "control", "XODR", "load_map"]
 
 
 def path(*parts: str) -> str:
@@ -49,3 +53,13 @@ def map_db() -> dict:
         "stoplines": load("stoplines.json")["stoplines"],
         "stoplines_all": load("stoplines_all.json")["stoplines"],
     }
+
+
+XODR = os.path.join(ROOT, "map", "HL_FMA_VTD_LivingLab.xodr")
+
+
+@functools.lru_cache(maxsize=1)
+def load_map():
+    """LivingLab 지도. 실측 0.34 초(2026-09-15)라 캐시 파일 없이 프로세스당 한 번 읽는다."""
+    from build_lane_plan import Map
+    return Map(XODR)

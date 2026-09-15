@@ -25,6 +25,9 @@ MAX_LATERAL = 8.0        # (도색선 없는 신호) 경로에서 이만큼 안�
 REPORT_RANGE = 150.0     # 이 앞까지 알린다[m] — VTD 실측 60~300 m 의 가운데쯤
 PASSED_MARGIN = 5.0      # 뒷축이 정지선을 이만큼 지날 때까지는 계속 알린다[m]
 NO_SIGNAL = 0            # 알릴 신호가 없을 때의 tl_id — VTD 는 -1 이 아니라 0 을 준다
+TL_FLASH = 6             # 적색점멸 — rule_stack 은 이 이름을 재노출하지 않는다(vtd_io.TL_FLASH)
+SIGNAL_MODES = ("always_green", "cycle", "always_red", "always_flash")   # always_red·always_flash 는 시험용
+_FIXED = {"always_green": rs.TL_GREEN, "always_red": rs.TL_RED, "always_flash": TL_FLASH}
 
 
 @dataclass(frozen=True)
@@ -105,8 +108,8 @@ class SignalProgram:
     offset: float = 0.0
 
     def state(self, t: float) -> int:
-        if self.mode == "always_green":
-            return rs.TL_GREEN
+        if self.mode in _FIXED:
+            return _FIXED[self.mode]
         tt = (t + self.offset) % (self.green + self.yellow + self.red)
         if tt < self.green:
             return rs.TL_GREEN
@@ -116,8 +119,8 @@ class SignalProgram:
 
 
 def programs_for(mode, signals, rng):
-    if mode == "always_green":
-        return {s.tl_id: SignalProgram("always_green") for s in signals}
+    if mode in _FIXED:
+        return {s.tl_id: SignalProgram(mode) for s in signals}
     if mode == "cycle":
         base = SignalProgram("cycle")
         period = base.green + base.yellow + base.red

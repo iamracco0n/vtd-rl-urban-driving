@@ -41,3 +41,16 @@ def test_단계1_목록():
     assert [b.name for b in boards] == ["course_A", "course_B", "course_D", "course_E", "course_G", "course_H"]
     assert all(b.signals == "always_green" for b in boards)
     assert all(len(b.route.pts) == len(b.lane_plan) for b in boards)
+
+
+def test_차로변경_표식_보존과_자르기():
+    b = load_board(H)
+    assert len(b.ego_lanes) == len(b.route.pts)
+    s = slice_board(b, 0.0, 250.0, "H_0_250")
+    assert len(s.ego_lanes) == len(s.route.pts)
+    assert s.ego_lanes == b.ego_lanes[:len(s.ego_lanes)]
+    assert s.signals == b.signals
+    red = slice_board(b, 0.0, 250.0, "H_red", signals="always_red")
+    assert red.signals == "always_red"
+    with pytest.raises(ValueError):
+        slice_board(b, 0.0, 250.0, "H_bad", signals="purple")

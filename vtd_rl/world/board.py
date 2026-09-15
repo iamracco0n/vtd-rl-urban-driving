@@ -5,8 +5,7 @@ from dataclasses import dataclass, field
 
 from vtd_rl import rule_stack as rs
 from vtd_rl.world.route import RouteIndex
-
-SIGNAL_MODES = ("always_green", "cycle")
+from vtd_rl.world.signals import SIGNAL_MODES
 
 
 @dataclass
@@ -15,6 +14,7 @@ class Board:
     scenario: object
     lane_plan: list
     signals: str = "always_green"
+    ego_lanes: list = field(default_factory=list)   # 경로 JSON ego_lanes — [i][4] 가 계획기 차로변경 표식
     route: RouteIndex = field(init=False)
 
     def __post_init__(self):
@@ -25,6 +25,8 @@ class Board:
             # 차로계획은 원본 ego_route 와 짝이다. route_points() 로 촘촘하게 나누면
             # 코스 H 는 2021 점이 되어 6점 어긋난다(2026-09-15 확인).
             raise ValueError(f"{self.name}: 경로점 {len(pts)} != 차로계획 {len(self.lane_plan)}")
+        if self.ego_lanes and len(self.ego_lanes) != len(pts):
+            raise ValueError(f"{self.name}: 경로점 {len(pts)} != ego_lanes {len(self.ego_lanes)}")
         self.route = RouteIndex(pts)
 
     @property
@@ -45,10 +47,13 @@ def _load_json(rel):
 def load_board(entry: dict, signals: str = "always_green") -> Board:
     sc = rs.Scenario.load(rs.path(entry["route"]))
     lane = _load_json(entry["lane"])["pts"]
-    return Board(entry["name"], sc, lane, signals)
+    ego_lanes = _load_json(entry["route"]).get("ego_lanes") or []
+    return Board(entry["name"], sc, lane, signals, ego_lanes)
 
 
-def slice_board(board: Board, s_from: float, s_to: float, name: str) -> Board:
+def slice_board(board: Board, s_from: float, s_to: float, name: str, signals: str | None = None) -> Board:
+    if signals is not None and signals not in SIGNAL_MODES:
+        raise ValueError(f"신호 운용은 {SIGNAL_MODES} 중 하나: {signals}")
     cum = board.route.cum
     i0 = bisect.bisect_left(cum, s_from)
     i1 = bisect.bisect_right(cum, s_to) - 1
@@ -66,7 +71,8 @@ def slice_board(board: Board, s_from: float, s_to: float, name: str) -> Board:
         actors=[], lights=[], zones=[],
         ego_route=pts, respawns=[], tl_stops={},
     )
-    return Board(name, sc, board.lane_plan[i0:i1 + 1], board.signals)
+    return Board(name, sc, board.lane_plan[i0:i1 + 1], signals or board.signals,
+                 board.ego_lanes[i0:i1 + 1])
 
 
 def load_curriculum(path: str):

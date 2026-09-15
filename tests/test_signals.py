@@ -118,3 +118,11 @@ def test_선생님이_아는_경로_위_신호_정지선을_world_도_안다(boa
     assert lines
     missing = [round(s_q) for s_q, _x, _y in lines if not any(abs(r.s - s_q) <= 10.0 for r in sig)]
     assert missing == []
+
+
+def test_시험용_신호_운용():
+    sig = [RouteSignal(10.0, 3)]
+    red = programs_for("always_red", sig, random.Random(0))
+    flash = programs_for("always_flash", sig, random.Random(0))
+    assert red[3].state(123.0) == rs.TL_RED
+    assert flash[3].state(0.0) == 6

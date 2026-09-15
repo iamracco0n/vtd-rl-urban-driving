@@ -30,3 +30,12 @@ def test_지도_DB():
     assert len(db["stoplines_all"][0]) == 3
     assert isinstance(db["crosswalks"], list) and isinstance(db["stoplines"], list)
     assert rs.map_db() is db          # 두 번째는 캐시
+
+
+def test_채점기_모듈과_지도():
+    assert rs.score_fma.MINOR == 3 and rs.score_fma.MAJOR == 6
+    assert callable(rs.check_lanes.classify) and callable(rs.check_lanes.lane_change_events)
+    assert callable(rs.control.PurePursuit) and callable(rs.control.LongPI)
+    mp = rs.load_map()
+    assert rs.load_map() is mp
+    assert mp.roads
