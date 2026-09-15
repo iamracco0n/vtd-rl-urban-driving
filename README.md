@@ -17,4 +17,16 @@ Hexagon VTD 2025.2 의 도심 지도(LivingLab)에서 도로교통법을 지키�
     .venv/bin/pip install -e . -r requirements-dev.txt
 
 ## 테스트
-    .venv/bin/pytest
+    env -u PYTHONPATH .venv/bin/pytest
+
+ROS2 `setup.bash` 를 source 한 셸은 `PYTHONPATH` 에 `/opt/ros/humble/...` 가 들어 있다. 그러면 pytest 가
+그곳의 플러그인(`launch_testing` 등)을 자동으로 불러오다 venv 에 없는 모듈(`yaml`)에서 시작도 못 한다.
+`env -u PYTHONPATH` 로 그 변수만 빼고 돌린다(ROS2 를 source 하지 않은 셸은 `.venv/bin/pytest` 만으로 된다).
+단계 ① 완주 테스트(`slow`, 판 6개를 끝까지 달린다)도 기본으로 함께 돈다 — 전체 1 분 안쪽.
+
+## M1 성적표 다시 만들기
+[docs/reports/m1-stage1-teacher.md](docs/reports/m1-stage1-teacher.md) 는 아래 두 줄로 만든다
+(스텝 속도를 먼저 재고, 그 JSON 을 넘겨 단계 ① 판을 달린다. 주행 CSV 는 `runs/m1/` 에 남고 커밋하지 않는다).
+
+    B=$(env -u PYTHONPATH .venv/bin/python scripts/bench_world.py --board course_H --seconds 120)
+    env -u PYTHONPATH .venv/bin/python scripts/run_stage1_teacher.py --bench "$B"

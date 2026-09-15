@@ -1,6 +1,7 @@
 """선생님이 단계 ① 판을 전부 달리고 성적표를 쓴다 — M1 완료 증거.
 
-    .venv/bin/python scripts/run_stage1_teacher.py --bench '<bench_world.py 출력 JSON>'
+    B=$(env -u PYTHONPATH .venv/bin/python scripts/bench_world.py --board course_H --seconds 120)
+    env -u PYTHONPATH .venv/bin/python scripts/run_stage1_teacher.py --bench "$B"
 CSV 는 runs/m1/ 에 남긴다(git 제외).
 """
 import argparse
@@ -8,14 +9,22 @@ import datetime
 import json
 import os
 import platform
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.join(HERE, "..")
+PULLOVER_ENV = os.environ.get("PULLOVER", "unset")   # drive.py 가 import 때 읽는다 — import 전에 기록
 sys.path.insert(0, REPO)
 from vtd_rl import rule_stack as rs  # noqa: E402
 from vtd_rl.rollout import run_teacher_episode  # noqa: E402
 from vtd_rl.world.board import load_curriculum  # noqa: E402
+
+
+def describe_rule_stack() -> str:
+    """서브모듈 작업트리까지 반영한 이름 — 고친 채로 돌렸으면 `-dirty` 가 붙는다."""
+    return subprocess.run(["git", "-C", rs.ROOT, "describe", "--always", "--dirty"], capture_output=True,
+                          text=True, check=True).stdout.strip()
 
 
 def main():
@@ -38,7 +47,8 @@ def main():
     lines = [
         "# M1 성적표 — 선생님(규칙 스택)이 오프라인 세계에서 단계 ① 판을 달린 결과", "",
         f"- 날짜 {datetime.date.today().isoformat()} · 머신 `{platform.node()}` · Python {platform.python_version()}",
-        f"- 규칙 스택 커밋 `{rs.commit()}`",
+        f"- 규칙 스택 커밋 `{rs.commit()}` · 작업트리 `{describe_rule_stack()}`",
+        f"- 환경변수 `PULLOVER` = `{PULLOVER_ENV}` (규칙 스택 `PULLOVER_MODE` = `{rs.DrivingStack.PULLOVER_MODE}`)",
         f"- 단계 ① `{name}` · 판 {len(rows)}개 · **완주 {ok}/{len(rows)}**", "",
         "| 판 | 경로 길이 [m] | 결과 | 달린 거리 [m] | 시뮬 시간 [s] | 스텝 | 벽시계 [s] | 스텝/초 |",
         "|---|---:|---|---:|---:|---:|---:|---:|",
