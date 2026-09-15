@@ -3,6 +3,9 @@
 규칙 스택은 패키지가 아니라 `src/`·`eval/`·`vtd/` 폴더에 모듈이 흩어져 있고 서로를
 최상위 이름(`from drive import ...`)으로 부른다. 그래서 세 폴더를 sys.path 앞에 넣는다.
 세 폴더 사이에 같은 모듈 이름은 없다(2026-09-15 확인).
+
+⚠️ 이 모듈을 import 하면 규칙 스택 모듈(`main`, `evaluate`, `control`, `scenario` 등)이 sys.path **맨 앞**에
+   오므로, 나중에 같은 이름의 패키지·모듈을 import 하면 규칙 스택 쪽이 먼저 잡혀 가려질 수 있다.
 """
 import functools
 import json
