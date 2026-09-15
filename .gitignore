@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+runs/
+*.csv
+*.pkl
+*.mp4
+# 주최측 자료 — 공개 레포에 올리지 않는다
+*.xodr

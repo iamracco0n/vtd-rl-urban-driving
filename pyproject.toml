@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vtd-rl-urban-driving"
+version = "0.1.0"
+description = "VTD LivingLab 도심 주행 end-to-end 강화학습"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["vtd_rl*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: 코스 한 판 이상을 끝까지 달리는 느린 테스트"]
