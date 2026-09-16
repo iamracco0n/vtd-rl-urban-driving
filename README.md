@@ -33,6 +33,13 @@ ROS2 `setup.bash` 를 source 한 셸은 `PYTHONPATH` 에 `/opt/ros/humble/...` �
 
     env -u PYTHONPATH .venv/bin/python scripts/referee_parity_report.py
 
+## 강화학습 환경
+`vtd_rl/env` 는 세계와 심판을 Gymnasium 환경(`VtdDriveEnv`)으로 묶는다. 관측은 자차·경로·차로계획·신호·
+물체 16개의 정규화 벡터, 행동은 조향·가속 연속값과 지시등, 보상은 심판 감점으로 만든다(판단 10 Hz).
+결과: [docs/reports/m2b-env.md](docs/reports/m2b-env.md)
+
+    env -u PYTHONPATH .venv/bin/python scripts/run_m2b_env.py
+
 ## M1 성적표 다시 만들기
 [docs/reports/m1-stage1-teacher.md](docs/reports/m1-stage1-teacher.md) 는 아래 두 줄로 만든다
 (스텝 속도를 먼저 재고, 그 JSON 을 넘겨 단계 ① 판을 달린다. 주행 CSV 는 `runs/m1/` 에 남고 커밋하지 않는다).
