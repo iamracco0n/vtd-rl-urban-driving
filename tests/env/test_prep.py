@@ -37,6 +37,9 @@ def test_기록된_속도는_운전자가_아니라_세계_값이다():
 
 
 def test_스펙_보상표는_채점기_항목_번호와_맞다():
+    # 여기서는 표에 적힌 항목 번호가 score_fma.ITEMS 에 존재하는지만 본다. 그 항목이 실제로
+    # 경미/중대 어느 등급까지 나오는지는 항목별 등급 능력표가 구현(심판·채점기) 어디에도 없어
+    # 이 테스트로는 검증할 수 없다 — 아래 10 번 확인만 그 한 가지 예외를 좁게 잡는다.
     text = open(SPEC, encoding="utf-8").read()
     table = text.split("## 5. 보상")[1].split("## 6. 학습")[0]
     assert "11·14" in table                  # 충돌
@@ -46,3 +49,8 @@ def test_스펙_보상표는_채점기_항목_번호와_맞다():
             for num in line.split("|")[-2].replace("·", " ").split():
                 if num.isdigit():
                     assert int(num) in rs.score_fma.ITEMS
+
+    rows = {line.split("|")[1].strip(): line.split("|")[-2] for line in table.splitlines()
+            if line.startswith("|") and "·" in line}
+    assert "10" not in rows["경미 위반"].replace("·", " ").split()   # ⑩ 보행자 양보는 중대만
+    assert "10" in rows["중대 위반"].replace("·", " ").split()
