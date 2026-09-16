@@ -7,7 +7,7 @@ name = "vtd-rl-urban-driving"
 version = "0.1.0"
 description = "VTD LivingLab 도심 주행 end-to-end 강화학습"
 requires-python = ">=3.10"
-dependencies = ["gymnasium>=1.0,<2", "numpy==1.26.4"]
+dependencies = ["gymnasium>=1.0,<2", "numpy==1.26.4", "torch>=2.4,<3"]
 
 [tool.setuptools.packages.find]
 include = ["vtd_rl*"]
