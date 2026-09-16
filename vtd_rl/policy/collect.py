@@ -38,11 +38,11 @@ def collect_episode(board, policy=None, beta: float = 1.0, seed: int = 0,
     env.frame_hook = _label_hook
 
     vecs, objs, masks, controls, turns = [], [], [], [], []
-    student_steps, total_reward, fallbacks = 0, 0.0, 0
+    student_steps, total_reward = 0, 0.0
     try:
         obs, info = env.reset(seed=seed, options={"board": board.name})
         teacher.reset()
-        for _ in range(max_steps):
+        for step in range(max_steps):
             vec, obj, mask = flatten_obs(obs)
             if policy is not None and rng.random() >= beta:
                 action = policy.act(obs, deterministic=True)
@@ -52,12 +52,11 @@ def collect_episode(board, policy=None, beta: float = 1.0, seed: int = 0,
             holder["cmd"] = None           # 이번 env.step() 의 첫 프레임을 기다린다
             obs, reward, terminated, truncated, info = env.step(action)
             total_reward += reward
-            if holder["cmd"] is not None:
-                cmd = holder["cmd"]
-                label = from_command(cmd.steer, cmd.accel, cmd.turn, env.cfg.action)
-            else:
-                label = action              # 프레임이 한 번도 안 돎(있어선 안 되는 경우) — 폴백
-                fallbacks += 1
+            if holder["cmd"] is None:      # 있어선 안 되는 경우 — 실행 행동을 정답으로 속여 쌓지 않는다
+                raise RuntimeError(f"[collect] {board.name} seed={seed} step={step}: "
+                                    "프레임 훅이 한 번도 안 돎 — 라벨을 만들 수 없다")
+            cmd = holder["cmd"]
+            label = from_command(cmd.steer, cmd.accel, cmd.turn, env.cfg.action)
             vecs.append(vec)
             objs.append(obj)
             masks.append(mask)
@@ -69,9 +68,6 @@ def collect_episode(board, policy=None, beta: float = 1.0, seed: int = 0,
         teacher.detach()
         env.frame_hook = None    # detach() 는 self._on_frame 과만 같음을 비교한다 — 여기서 감쌌으니 직접 뗀다
         env.close()
-    if fallbacks:
-        print(f"[collect] {board.name} seed={seed}: 라벨 폴백 {fallbacks}회(프레임 훅이 한 번도 안 돎)",
-              flush=True)
     meta = {"board": board.name, "seed": int(seed), "beta": float(beta),
             "outcome": info["outcome"], "steps": len(turns),
             "reward": float(total_reward), "student_steps": int(student_steps)}
