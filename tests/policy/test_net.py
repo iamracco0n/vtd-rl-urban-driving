@@ -66,3 +66,26 @@ def test_저장하고_불러오면_같은_행동(tmp_path):
     a, b = net.act(obs), other.act(obs)
     assert np.allclose(a["control"], b["control"], atol=1e-6) and a["turn"] == b["turn"]
     assert other.cfg.trunk == (32, 32)
+
+
+def test_완전히_마스크된_물체는_다른_행동을_준다():
+    """완전히 마스크된 관측과 실제 물체가 있는 관측이 다른 행동을 생성하는지 확인.
+
+    이는 net.py 의 보호장치(torch.where)가 필요함을 핀한다:
+    완전히 마스크된 경우 NEG_BIG 으로 채워진 값 대신 0을 반환해야 한다.
+    """
+    net = DrivePolicy()
+
+    # 실제 물체가 있는 관측
+    obs1 = sample_obs(5)
+    obs1["object_mask"][0] = 1.0
+    obs1["objects"][0] = 0.5
+    a = net.act(obs1)
+
+    # 완전히 마스크된 관측 (모든 물체 마스크가 0)
+    obs2 = sample_obs(5)
+    obs2["object_mask"][:] = 0.0
+    b = net.act(obs2)
+
+    # 두 행동이 달라야 한다
+    assert not (np.allclose(a["control"], b["control"], atol=1e-6) and a["turn"] == b["turn"])
