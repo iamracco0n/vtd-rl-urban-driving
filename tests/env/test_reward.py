@@ -1,6 +1,5 @@
 import pytest
 
-from vtd_rl.env.board_index import board_index
 from vtd_rl.env.reward import COLLISION_ITEMS, RewardConfig, RewardShaper, ViolationTracker
 from vtd_rl.referee.core import Hit
 from vtd_rl.world.board import load_board, slice_board
@@ -75,3 +74,34 @@ def test_총합은_항의_합이다():
     zero = {"control": [0.0, 0.0], "turn": 0}
     out = sh.step([Hit(1.0, 0, 2, "major")], 5.0, zero, zero, "running")
     assert out.total == pytest.approx(sum(out.terms.values()))
+
+
+def test_같은_항목_같은_시각_다른_구간():
+    """한 침범이 구간 경계를 걸치면(같은 t, 다른 sec) 각 구간마다 센다."""
+    tr = ViolationTracker(1.0)
+    hits = [Hit(5.0, 0, 3, "minor"), Hit(5.0, 1, 3, "minor")]
+    counted = tr.count(hits)
+    assert len(counted) == 2
+    assert [(h.item, h.sec, h.t) for h in counted] == [(3, 0, 5.0), (3, 1, 5.0)]
+
+
+def test_같은_항목_같은_구간_반복_압축():
+    """같은 (항목, 구간) 반복은 repeat_gap에 한 번만 센다."""
+    tr = ViolationTracker(1.0)
+    hits = [Hit(t=k * 0.05, sec=0, item=2, level="major") for k in range(30)]  # 1.5 초 연속
+    counted = [h for k in range(30) for h in tr.count([hits[k]])]
+    assert [round(h.t, 2) for h in counted] == [0.0, 1.0]
+
+
+def test_항목15는_충돌이_아니라_위반():
+    """오프라인 세계에 없는 항목 15는 major 위반으로 센다."""
+    b = h_board()
+    cfg = RewardConfig()
+    sh = RewardShaper(b, cfg)
+    sh.reset()
+    zero = {"control": [0.0, 0.0], "turn": 0}
+    out = sh.step([Hit(1.0, 0, 15, "major")], 0.0, zero, zero, "running")
+    assert out.terms["violation"] == pytest.approx(cfg.major)
+    assert out.terms["collision"] == 0.0
+    assert out.collision is False
+    assert out.counted == 1

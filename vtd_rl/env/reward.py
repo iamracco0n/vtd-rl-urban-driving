@@ -1,8 +1,10 @@
 """보상 — 스펙 §5. 심판이 낸 감점과 진행 거리로 매 걸음 보상을 만든다.
 
 대회는 같은 항목을 구간당 한 번만 깎지만 학습 보상은 위반마다 깎는다. 다만 심판은 채점기와 같은
-호출을 다 내므로(과속 한 판에 198번) 같은 항목이 이어지면 repeat_gap 초에 한 번만 센다 —
-'한 번 깎였으니 계속 어겨도 된다' 와 '프레임마다 깎여서 다른 항이 묻힌다' 사이를 가른다.
+호출을 다 내므로(과속 한 판에 198번, 침범이 구간을 걸치면 구간마다) 같은 (항목, 구간)이
+이어지면 repeat_gap 초에 한 번만 센다 — '한 번 깎였으니 계속 어겨도 된다' 와
+'프레임마다 깎여서 다른 항이 묻힌다' 사이를 가른다. 구간 경계 지날 때는 새 구간이 시작되어
+새로 센다(채점기 방식 따름).
 """
 from dataclasses import dataclass, field
 
@@ -43,9 +45,10 @@ class ViolationTracker:
     def count(self, hits):
         out = []
         for h in hits:
-            last = self._last.get(h.item)
+            key = (h.item, h.sec)
+            last = self._last.get(key)
             if last is None or h.t - last >= self.repeat_gap - 1e-9:
-                self._last[h.item] = h.t
+                self._last[key] = h.t
                 out.append(h)
         return out
 
