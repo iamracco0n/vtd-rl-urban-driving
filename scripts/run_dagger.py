@@ -18,7 +18,7 @@ sys.path.insert(0, REPO)
 from vtd_rl import rule_stack as rs  # noqa: E402
 from vtd_rl.policy import device as pick_device  # noqa: E402
 from vtd_rl.policy.collect import collect_episode  # noqa: E402
-from vtd_rl.policy.dataset import load_dir, save_shard  # noqa: E402
+from vtd_rl.policy.dataset import load_dir, load_shard, save_shard  # noqa: E402
 from vtd_rl.policy.evaluate import evaluate_policy, evaluate_teacher  # noqa: E402
 from vtd_rl.policy.net import DrivePolicy, PolicyConfig  # noqa: E402
 from vtd_rl.policy.train import TrainConfig, train_epochs  # noqa: E402
@@ -26,6 +26,7 @@ from vtd_rl.world.board import load_board, load_curriculum, slice_board  # noqa:
 
 BETAS = [1.0, 0.5, 0.25, 0.1, 0.0]
 H = {"name": "course_H", "route": "routes/HL_FMA_NEW_H.json", "lane": "routes/HL_FMA_NEW_H_lane.json"}
+STOPPED_SPEED = 0.02   # vec[:,0] = ego 속도/25 클립값 — 0.02 는 약 0.5 m/s 이하, "거의 정지"
 
 
 def _collect_job(job):
@@ -48,6 +49,22 @@ def _boards(curriculum, smoke, only=None):
 def _new_net(smoke, dev):
     cfg = PolicyConfig(trunk=(64, 64)) if smoke else PolicyConfig()
     return DrivePolicy(cfg).to(dev)
+
+
+def _stall_start_count(data_dir, rnd, names, num_seeds) -> int:
+    """이 라운드에 새로 모은 조각만 다시 읽어(재수집 없이) 센다 —
+
+    자차가 거의 정지(`vec[:,0] < STOPPED_SPEED`)했는데 선생님 라벨은 출발하라고 한
+    (`control[:,1] > 0`, 곧 양의 가속) 표본 수. 학생이 멈춰서 못 움직이는 실패 양상을
+    교정하는 바로 그 신호이므로, 라운드가 갈수록 느는지 주는지가 M4 의 출발점이다.
+    """
+    n = 0
+    for name in names:
+        for s in range(num_seeds):
+            seed = 1000 * rnd + s          # _collect_job 이 파일명에 쓰는 것과 같은 시드 계산
+            shard = load_shard(os.path.join(data_dir, f"r{rnd}-{name}-s{seed}.npz"))
+            n += int(((shard.vec[:, 0] < STOPPED_SPEED) & (shard.control[:, 1] > 0.0)).sum())
+    return n
 
 
 def _teacher_caveat(teacher2: dict) -> str:
@@ -149,6 +166,7 @@ def main():
         else:
             metas = [_collect_job(j) for j in jobs]
         collect_s = time.perf_counter() - t_collect
+        stall_start = _stall_start_count(data_dir, rnd, names, a.seeds)
 
         dataset = load_dir(data_dir)
         # DAgger 는 라운드마다 누적 데이터셋에 예측기를 "다시" 짓는다 — 이전 라운드 그물을 웜스타트로
@@ -165,6 +183,7 @@ def main():
         row = {"round": rnd, "beta": beta, "episodes": len(metas),
                "collect_goal": sum(1 for m in metas if m["outcome"] == "goal"),
                "samples": len(dataset), "collect_s": collect_s, "train": train,
+               "stall_start": stall_start,
                "stage1": {k: ev1[k] for k in ("goal_rate", "mean_score", "mean_reward")},
                "stage2": {k: ev2[k] for k in ("goal_rate", "mean_score", "mean_reward")}}
         rounds.append(row)
@@ -189,14 +208,30 @@ def main():
         f"- 선생님 기준: 단계 ① 완주율 {teacher1['goal_rate']*100:.0f}% 점수 {teacher1['mean_score']:.1f} · "
         f"단계 ② 완주율 {teacher2['goal_rate']*100:.0f}% 점수 {teacher2['mean_score']:.1f}",
         f"- {_teacher_caveat(teacher2)}", "",
-        "| 라운드 | β | 수집 판(완주) | 누적 표본 | 손실 | 단계 ① 완주율 | 단계 ① 점수 | 단계 ② 완주율 | 단계 ② 점수 |",
-        "|---:|---:|---|---:|---:|---:|---:|---:|---:|",
+        "| 라운드 | β | 수집 판(완주) | 누적 표본 | 손실 | 정지-출발 표본 | 단계 ① 완주율 | 단계 ① 점수 |"
+        " 단계 ② 완주율 | 단계 ② 점수 |",
+        "|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for r in rounds:
         lines.append(f"| {r['round']} | {r['beta']} | {r['episodes']}({r['collect_goal']}) | "
-                     f"{r['samples']} | {r['train']['loss']:.3f} | "
+                     f"{r['samples']} | {r['train']['loss']:.3f} | {r['stall_start']} | "
                      f"{r['stage1']['goal_rate']*100:.0f}% | {r['stage1']['mean_score']:.1f} | "
                      f"{r['stage2']['goal_rate']*100:.0f}% | {r['stage2']['mean_score']:.1f} |")
+
+    # 가장 좋았던 라운드 — 목표 판정(last)은 그대로 두고, M4 를 위해 "될 수 있었다" 는 사실도 남긴다.
+    # 동률이면 더 뒤 라운드(round 값이 더 큰 쪽)를 고른다.
+    best = max(rounds, key=lambda r: (r["stage1"]["goal_rate"], r["round"]))
+    best_ok = (best["stage1"]["goal_rate"] >= 0.9
+              and best["stage1"]["mean_score"] >= teacher1["mean_score"] - 10.0)
+    best_ckpt = os.path.join(a.out, f"policy-r{best['round']}.pt")
+    lines += ["", f"- 가장 좋았던 라운드: {best['round']}(β={best['beta']}) — 단계 ① 완주율 "
+              f"{best['stage1']['goal_rate']*100:.0f}% 점수 {best['stage1']['mean_score']:.1f} → 목표 두 "
+              f"조건 **{'달성' if best_ok else '미달'}** · 체크포인트 `{best_ckpt}`"]
+    trend = ("늘었다" if last["stall_start"] > best["stall_start"]
+             else "줄었다" if last["stall_start"] < best["stall_start"] else "변하지 않았다")
+    lines += [f"- 라운드 {best['round']}(가장 좋음)의 새로 모은 판에서 '정지 상태인데 선생님은 출발하라고"
+              f" 한' 표본이 {best['stall_start']}건, 라운드 {last['round']}(마지막)에서는 "
+              f"{last['stall_start']}건이다 — {trend}."]
     lines += _final_outcome_lines(ev1)
     lines += ["", "학생은 결정적 행동으로 혼자 몬다. 점수는 환경이 낸 구간 점수의 평균이고,",
               "환경의 감점표가 대회 채점기와 같다는 것은 M2a·M2b 성적표에 있다.",
