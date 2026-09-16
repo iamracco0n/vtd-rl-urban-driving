@@ -68,9 +68,9 @@ def test_판이_끝나면_성적이_따라온다():
         _o, _r, term, trunc, info = env.step({"control": np.array([0.0, 0.6], np.float32), "turn": 0})
         if term or trunc:
             break
-    assert info["outcome"] in ("goal", "offroad", "timeout", "stalled")
-    assert "episode" in info and "sheet" in info["episode"]
-    assert len(info["episode"]["sheet"]) == 5
+    assert info["outcome"] in ("goal", "offroad", "timeout", "stalled", "collision")
+    assert "result" in info and "sheet" in info["result"]
+    assert len(info["result"]["sheet"]) == 5
     env.close()
 
 
@@ -82,6 +82,62 @@ def test_행_CSV_남기기(tmp_path):
     env.reset(seed=1)
     files = sorted(p.name for p in tmp_path.iterdir())
     assert files and files[0].startswith("H_0_250-")
-    head = open(tmp_path / files[0], encoding="utf-8").readline()
-    assert head.startswith("t,x,y,heading,v")
+    lines = open(tmp_path / files[0], encoding="utf-8").readlines()
+    assert lines[0].startswith("t,x,y,heading,v")
+    assert len(lines) == 5 * 2 + 1        # 머리글 + 시뮬 프레임마다 한 행(걸음마다 두 프레임)
+    env.close()
+
+
+def test_frame_hook은_시뮬_프레임마다_불린다():
+    env = VtdDriveEnv([boards()[0]])
+    env.reset(seed=0)
+    clocks = []
+    env.frame_hook = lambda state, clock: clocks.append(clock)
+    n_steps = 5
+    for _ in range(n_steps):
+        _o, _r, term, trunc, _info = env.step(
+            {"control": np.array([0.0, 0.5], np.float32), "turn": 0})
+        assert not term and not trunc
+    assert len(clocks) == 2 * n_steps
+    assert all(a <= b for a, b in zip(clocks, clocks[1:]))
+    env.close()
+
+
+def test_종료_후_다시_밟아도_성적표가_그대로다():
+    env = VtdDriveEnv([boards()[0]])
+    env.reset(seed=0)
+    info = None
+    for _ in range(60):
+        _o, _r, term, trunc, info = env.step(
+            {"control": np.array([1.0, 0.6], np.float32), "turn": 0})   # 최대 조향으로 도로 이탈 유도
+        if term or trunc:
+            break
+    assert term or trunc
+    assert "result" in info
+    sheet_before = [dict(s) for s in env.referee.sheet.state]
+
+    calls = []
+    env.frame_hook = lambda state, clock: calls.append(clock)
+    _o2, reward2, term2, trunc2, info2 = env.step(
+        {"control": np.array([0.0, 0.0], np.float32), "turn": 0})
+
+    assert [dict(s) for s in env.referee.sheet.state] == sheet_before
+    assert "result" not in info2
+    assert reward2 == 0.0
+    assert calls == []                    # 이미 끝난 판은 프레임을 더 밟지 않는다
+    assert (term2, trunc2) == (term, trunc)
+    env.close()
+
+
+def test_리셋_전에_스텝하면_명확한_오류():
+    env = VtdDriveEnv([boards()[0]])
+    with pytest.raises(RuntimeError):
+        env.step({"control": np.array([0.0, 0.0], np.float32), "turn": 0})
+    env.close()
+
+
+def test_없는_판_이름은_명확한_오류():
+    env = VtdDriveEnv([boards()[0]])
+    with pytest.raises(ValueError):
+        env.reset(seed=0, options={"board": "없는판"})
     env.close()

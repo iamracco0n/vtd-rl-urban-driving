@@ -2,6 +2,12 @@
 
 한 걸음(기본 10 Hz)은 시뮬 두 프레임이다. 심판과 행 기록은 **프레임마다** 돈다 —
 채점기와 같은 판정을 내려면 20 Hz 행이 필요하고, 그림자 선생님도 프레임마다 같은 입력을 받아야 한다.
+
+판이 끝나면(`terminated`/`truncated`) 그 걸음의 `info["result"]`에 성적(`score`·`sheet`·`respawns`·
+`notes`·`rows_csv`)이 실린다 — `info["episode"]`가 아니다. Gymnasium 의 `RecordEpisodeStatistics`,
+SB3 의 `Monitor` 래퍼가 `info["episode"]`를 덮어써서 성적표가 조용히 사라지기 때문이다.
+그 뒤로 `step()`이 또 오면(정상적으로는 오면 안 되지만) 세계·심판·행 기록기를 더 건드리지
+않고 마지막 상태를 그대로 돌려준다 — `finish()`는 판마다 정확히 한 번만 불러야 한다.
 """
 import os
 from dataclasses import dataclass, field
@@ -52,6 +58,8 @@ class VtdDriveEnv(gym.Env):
         self._info = None
         self._prev_action = self._zero_action()
         self._shaper = None
+        self._done = False       # 판이 끝난 뒤 다시 step() 이 와도 세계·심판을 더 밟지 않는 걸쇠
+        self._terminal = None    # 걸쇠가 걸릴 때의 (outcome, terminated, truncated) — 그대로 되돌려준다
 
     # ------------------------------------------------------------------ Gymnasium
     def reset(self, seed=None, options=None):
@@ -59,7 +67,11 @@ class VtdDriveEnv(gym.Env):
         self._close_recorder()
         name = (options or {}).get("board")
         if name is not None:
-            self.board = next(b for b in self.boards if b.name == name)
+            try:
+                self.board = next(b for b in self.boards if b.name == name)
+            except StopIteration:
+                names = [b.name for b in self.boards]
+                raise ValueError(f"판을 찾을 수 없다: {name!r} (있는 판: {names})") from None
         else:
             self.board = self.boards[int(self.np_random.integers(len(self.boards)))]
         world_seed = int(self.np_random.integers(2 ** 31 - 1))
@@ -76,11 +88,17 @@ class VtdDriveEnv(gym.Env):
         self._prev_action = self._zero_action()
         self._episode += 1
         self._recorder = RowRecorder(self._csv_path())
+        self._done = False
+        self._terminal = None
         obs = build_observation(self.world, self.state, self._info, self._prev_pair(), self.cfg.obs)
         return obs, {"board": self.board.name, "outcome": RUNNING, "s": 0.0, "sim_time": 0.0,
                      "frames": 0, "hits": [], "counted": 0, "reward_terms": {}}
 
     def step(self, action):
+        if self.world is None:
+            raise RuntimeError("reset() 을 먼저 불러야 한다")
+        if self._done:
+            return self._frozen_step()
         steer, accel, turn = to_command(action, self.cfg.action)
         cmd = rs.Command(steer=steer, accel=accel, turn=turn, reason="RL", cap_by="RL")
         s0 = self._info.s if self._info is not None else 0.0
@@ -104,14 +122,31 @@ class VtdDriveEnv(gym.Env):
                              "turn": int(action["turn"])}
         terminated = outcome in ("goal", "offroad") or shaped.collision
         truncated = outcome in ("timeout", "stalled")
+        if outcome == RUNNING and shaped.collision:
+            outcome = "collision"        # 세계는 충돌을 모른다 — 심판이 낸 충돌 항목이 종료 사유다
         info = {"board": self.board.name, "outcome": outcome, "s": self._info.s,
                 "sim_time": self._info.t, "frames": frames,
                 "hits": [(h.t, h.sec, h.item, h.level) for h in hits],
                 "counted": shaped.counted, "reward_terms": shaped.terms}
         if terminated or truncated:
-            info["episode"] = self._finish()
+            self._done = True
+            self._terminal = (outcome, bool(terminated), bool(truncated))
+            info["result"] = self._finish()
         obs = build_observation(self.world, self.state, self._info, self._prev_pair(), self.cfg.obs)
         return obs, float(shaped.total), bool(terminated), bool(truncated), info
+
+    def _frozen_step(self):
+        """판이 이미 끝난 뒤 온 step() — 세계·심판·행 기록기를 더 밟지 않고 마지막 상태를 그대로 준다.
+
+        `_finish()`가 행 기록기를 닫아 두기도 했고(다시 쓰면 예외), 세계는 충돌 뒤에도
+        `outcome="running"`을 낼 수 있어 그대로 다시 밟으면 `finish()`가 또 불려 같은 판정을
+        성적표에 다시 쓸 수 있다 — 그래서 이 걸음은 아무것도 하지 않는다.
+        """
+        outcome, terminated, truncated = self._terminal
+        obs = build_observation(self.world, self.state, self._info, self._prev_pair(), self.cfg.obs)
+        info = {"board": self.board.name, "outcome": outcome, "s": self._info.s,
+                "sim_time": self._info.t, "frames": 0, "hits": [], "counted": 0, "reward_terms": {}}
+        return obs, 0.0, terminated, truncated, info
 
     def close(self):
         self._close_recorder()
