@@ -54,7 +54,9 @@ class World:
     def clock(self) -> float:
         return self.cfg.clock_origin + self.t
 
-    def reset(self):
+    def reset(self, seed: int | None = None):
+        if seed is not None:
+            self.seed = int(seed)
         rng = random.Random(self.seed)
         x, y, h = self.board.start_pose
         self.ego = dyn.EgoState(x, y, h)
@@ -88,6 +90,7 @@ class World:
         objs = nearest_objects(objs, self.ego.x, self.ego.y, self.cfg.object_range, self.cfg.max_objects)
         tl_id, tl_state = self.reporter.report(p.s, p.index, self.t)
         return rs.State(x=self.ego.x, y=self.ego.y, heading=self.ego.heading, objects=objs,
+                        speed=self.ego.v, speed_raw=self.ego.v,
                         tl_id=tl_id, tl_state=tl_state, t=self.clock)
 
     def _outcome(self, p) -> str:

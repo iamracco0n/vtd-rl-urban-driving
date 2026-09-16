@@ -37,6 +37,7 @@ def run_episode(board, driver, config=None, log_csv=None, seed=0) -> EpisodeRun:
     try:
         while info is None or not info.done:
             cmd = driver.act(state, info, world.cfg.dt)
+            state.speed = world.ego.v        # 로그 속도의 주인은 세계다(운전자 추정값이 아니라)
             rows.append(recorder.record(world.t, state, cmd))
             state, info = world.step(cmd.steer, cmd.accel, cmd.turn)
     finally:

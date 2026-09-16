@@ -2,12 +2,14 @@ import pytest
 
 from vtd_rl import rule_stack as rs
 from vtd_rl.world import dynamics as dyn
-from vtd_rl.world.board import Board
+from vtd_rl.world.board import Board, load_board
 from vtd_rl.world.signals import RouteSignal
 from vtd_rl.world.world import World, WorldConfig
 
 LANE = {"lane": -1, "w": 3.5, "l": 1.75, "r": 1.75, "pl": 1.75, "pr": 1.75, "xl": 0.0, "xr": 0.0,
         "need": 0.0, "sig": 0, "j": 0, "jx": 0, "lim": 13.9}
+
+H = {"name": "course_H", "route": "routes/HL_FMA_NEW_H.json", "lane": "routes/HL_FMA_NEW_H_lane.json"}
 
 
 def straight_board(length=200, actors=(), duration=60.0, signals="always_green"):
@@ -117,3 +119,27 @@ def test_리셋하면_처음부터():
     drive(w, 0.0, 2.0, 2.0)
     s = w.reset()
     assert (s.x, w.t, w.ego.v) == (0.0, 0.0, 0.0)
+
+
+def test_리셋_시드():
+    b = load_board(H, signals="cycle")
+    w = World(b, seed=1)
+    w.reset(7)
+    first = [w.reporter.report(0.0, 0, t)[1] for t in range(0, 60, 5)]
+    w.reset(7)
+    assert [w.reporter.report(0.0, 0, t)[1] for t in range(0, 60, 5)] == first
+    assert w.seed == 7
+    w.reset(8)
+    assert w.seed == 8
+    w.reset()
+    assert w.seed == 8                      # 시드를 안 주면 마지막 시드를 그대로 쓴다
+
+
+def test_상태_속도는_세계가_채운다():
+    w = World(load_board(H))
+    s = w.reset()
+    assert s.speed == 0.0
+    for _ in range(20):
+        s, info = w.step(0.0, 1.0, 0)
+    assert s.speed == pytest.approx(w.ego.v) and s.speed > 0.5
+    assert s.speed_raw == pytest.approx(w.ego.v)

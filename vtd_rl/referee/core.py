@@ -81,6 +81,27 @@ class Context:
                    m.tl_stops, m.cws)
 
 
+_CONTEXT_CACHE: dict = {}
+
+
+def clear_context_cache():
+    _CONTEXT_CACHE.clear()
+
+
+def context_for(board, sections=5) -> Context:
+    """판·구간 수마다 한 번만 비싼 입력을 만들고, notes 만 새로 담은 Context 를 준다.
+
+    match_inputs 는 횡단보도를 경로 전체와 비교하고 FastSections 는 격자를 짓는다(판마다 40~99 ms).
+    환경은 리셋마다 심판을 새로 만들기 때문에 그대로 두면 그 비용을 매 판 낸다.
+    """
+    key = (board.name, sections, len(board.route.pts))
+    cached = _CONTEXT_CACHE.get(key)
+    if cached is None:
+        cached = _CONTEXT_CACHE[key] = Context.build(board, sections)
+    return Context(cached.board, cached.sections, cached.secs, cached.lim_at, cached.lc_at,
+                   cached.tl_stops, cached.cws)
+
+
 def default_judges(use_map):
     from vtd_rl.referee.judges.contact import ContactJudge, CrosswalkStopJudge
     from vtd_rl.referee.judges.lane_geometry import LaneGeometryJudge
@@ -97,7 +118,7 @@ def default_judges(use_map):
 
 class Referee:
     def __init__(self, board, sections=5, use_map=True, judges=None):
-        self.ctx = Context.build(board, sections)
+        self.ctx = context_for(board, sections)
         self.map = rs.load_map() if use_map else None
         classes = default_judges(use_map) if judges is None else judges
         self.judges = [cls(self.ctx) for cls in classes]
