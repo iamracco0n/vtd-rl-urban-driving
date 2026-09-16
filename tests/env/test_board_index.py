@@ -45,7 +45,6 @@ def test_코스_G_보호구역():
     # 슬라이스 시작 부근 (경로점 인덱스 낮음): 보호구역 아님
     assert bi.zone[0] is False
     # 슬라이스 끝 부근 (경로점 인덱스 높음): 보호구역임 (30 km/h ≤ 20 km/h 한계)
-    # 가장 마지막 경로점이 보호구역에 있는지 확인
-    last_zone_check = min(i for i in range(len(bi.zone)) if bi.zone[i])  # 처음 True인 인덱스
-    assert last_zone_check < len(bi.zone)  # 보호구역이 적어도 존재함
+    # 보호구역이 슬라이스 끝까지 이어짐
+    assert bi.zone[-1] is True
     assert any(bi.zone)  # 슬라이스 안에 보호구역이 있음
