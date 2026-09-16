@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env
 
+from vtd_rl import rule_stack as rs
 from vtd_rl.env.drive_env import EnvConfig, VtdDriveEnv
 from vtd_rl.world.board import load_board, slice_board
 
@@ -11,6 +12,19 @@ H = {"name": "course_H", "route": "routes/HL_FMA_NEW_H.json", "lane": "routes/HL
 def boards():
     b = load_board(H)
     return [slice_board(b, 0.0, 250.0, "H_0_250"), slice_board(b, 250.0, 500.0, "H_250_500")]
+
+
+def rammer_board():
+    """H 0~250 에 정지 차량 하나를 세운 판 — `referee/scenarios.py` 의 `vehicle_rammer` 와 같은 대본.
+
+    액터 목록은 World 를 지을 때 읽히고 세계 캐시는 env 인스턴스마다 따로이므로, 이 판은 여기서
+    새로 짓고(공유 `boards()` 재사용 금지) 이 판을 쓰는 env 도 매번 새로 만든다.
+    """
+    b = slice_board(load_board(H), 0.0, 250.0, "H_0_250_rammer")
+    x, y, _h = b.route.point_at(60.0)
+    b.scenario.actors = [rs.Actor(id=901, type="vehicle", size=[4.5, 1.8, 1.5],
+                                  spawn={"at_time": 0.0}, motion={"kind": "static", "pos": [x, y]})]
+    return b
 
 
 def test_gymnasium_환경_검사():
@@ -125,6 +139,34 @@ def test_종료_후_다시_밟아도_성적표가_그대로다():
     assert "result" not in info2
     assert reward2 == 0.0
     assert calls == []                    # 이미 끝난 판은 프레임을 더 밟지 않는다
+    assert (term2, trunc2) == (term, trunc)
+    env.close()
+
+
+def test_충돌하면_종료_사유가_충돌이고_다시_밟아도_성적표가_그대로다():
+    env = VtdDriveEnv([rammer_board()])
+    env.reset(seed=0)
+    info = None
+    for _ in range(300):
+        _o, _r, term, trunc, info = env.step(
+            {"control": np.array([0.0, 1.0], np.float32), "turn": 0})   # 똑바로 최대 가속
+        if term or trunc:
+            break
+    assert term and not trunc                # 세계는 running 인 채 충돌로 끝난다 — 도로 이탈이 아니다
+    assert info["outcome"] == "collision"
+    assert 14 in {h[2] for h in info["hits"]}
+    assert "result" in info
+    sheet_before = [dict(s) for s in env.referee.sheet.state]
+
+    calls = []
+    env.frame_hook = lambda state, clock: calls.append(clock)
+    _o2, reward2, term2, trunc2, info2 = env.step(
+        {"control": np.array([0.0, 0.0], np.float32), "turn": 0})
+
+    assert [dict(s) for s in env.referee.sheet.state] == sheet_before
+    assert "result" not in info2
+    assert reward2 == 0.0
+    assert calls == []
     assert (term2, trunc2) == (term, trunc)
     env.close()
 
