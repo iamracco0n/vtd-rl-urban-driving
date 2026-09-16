@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from vtd_rl import rule_stack as rs
-from vtd_rl.env.observation import ObsConfig, build_observation, observation_space
+from vtd_rl.env.observation import ObsConfig, _object_class, build_observation, observation_space
+from vtd_rl.referee.judges.contact import PERSON_MIN_H
 from vtd_rl.world.board import load_board, slice_board
 from vtd_rl.world.world import World
 
@@ -90,3 +91,29 @@ def test_물체는_가까운_순_16개까지():
     assert obs["object_mask"].sum() == 16
     d = np.hypot(obs["objects"][:, 0], obs["objects"][:, 1])
     assert np.all(np.diff(d) >= -1e-6)                      # 가까운 순
+
+
+def test_물체_종류는_접촉_판정기와_같은_기준():
+    """관측의 사람·차량·사물 분류가 보상을 내는 심판(judges/contact.py)의 ⑪⑭ 판정과 같아야 한다.
+
+    치수는 VTD 카탈로그 실측값. 기대값을 여기 그대로 적어 둬서, 나중에 문턱(PED_L·PED_W·
+    PERSON_MIN_H)이 바뀌면 이 테스트가 조용히 따라가지 않고 소리 내어 실패하게 한다.
+    """
+    cases = [
+        ("승용차", 4.5, 1.8, 1.5, [1.0, 0.0, 0.0]),           # 차량 (length > PED_L)
+        ("보행자", 0.6, 0.7, 1.8, [0.0, 1.0, 0.0]),           # 사람
+        ("휠체어", 1.01, 0.62, 0.92, [0.0, 0.0, 1.0]),        # 키 0.92 < 1.2m → 사물(사람 아님)
+        ("입식 자전거", 1.90, 0.65, 1.10, [0.0, 0.0, 1.0]),    # 키 1.10 < 1.2m → 사물(사람 아님)
+        ("라바콘", 0.15, 0.46, 0.61, [0.0, 0.0, 1.0]),         # 사물
+    ]
+    for name, length, width, height, expected in cases:
+        o = rs.Obj(id=1, x=0.0, y=0.0, z=0.0, heading=0.0, speed=0.0,
+                   length=length, width=width, height=height)
+        got = _object_class(o)
+        assert got == expected, name
+
+        # judges/contact.py 의 사람·차량 판정식과 정확히 일치해야 한다
+        person = length <= rs.score_fma.PED_L and width <= rs.score_fma.PED_W and height >= PERSON_MIN_H
+        vehicle = length > rs.score_fma.PED_L
+        assert (got == [0.0, 1.0, 0.0]) == person, name
+        assert (got == [1.0, 0.0, 0.0]) == vehicle, name

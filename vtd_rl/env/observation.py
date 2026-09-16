@@ -11,10 +11,11 @@ from gymnasium import spaces
 
 from vtd_rl import rule_stack as rs
 from vtd_rl.env.board_index import board_index
+from vtd_rl.referee.judges.contact import PERSON_MIN_H
 
 TL_STATES = 7             # vtd_io: UNSET·RED·YELLOW·GREEN·LEFT·GREEN_LEFT·FLASH
 PED_L, PED_W = rs.score_fma.PED_L, rs.score_fma.PED_W     # 사람·이륜차 판별(채점기와 같은 치수)
-PED_MIN_H = rs.score_fma.PED_MIN_H
+PED_MIN_H = PERSON_MIN_H  # judges/contact.py 의 ⑪⑭ 판정과 같은 키 문턱(score_fma.PED_MIN_H=0.85 아님)
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,12 @@ def _turn_onehot(turn):
 
 
 def _object_class(o):
-    """치수로 종류를 나눈다 — 채점기 ⑪⑭ 와 같은 기준(차량·사람류·사물)."""
+    """치수로 종류를 나눈다 — `referee/judges/contact.py` 의 ⑪⑭ 판정과 같은 기준(차량·사람류·사물).
+
+    관측의 분류가 보상을 내는 심판의 분류와 어긋나면 정책이 틀린 신호를 배운다 —
+    그래서 PED_MIN_H 는 score_fma.PED_MIN_H(0.85) 가 아니라 judges/contact.py 의
+    PERSON_MIN_H(1.2, item_contact 안의 숫자를 그대로 옮김)를 쓴다.
+    """
     if o.length > PED_L:
         return [1.0, 0.0, 0.0]
     if o.length <= PED_L and o.width <= PED_W and o.height >= PED_MIN_H:
