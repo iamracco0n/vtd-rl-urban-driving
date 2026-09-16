@@ -68,6 +68,23 @@ def test_저장하고_불러오면_같은_행동(tmp_path):
     assert other.cfg.trunk == (32, 32)
 
 
+def test_log_std_는_바닥_아래로_안_내려간다():
+    net = DrivePolicy(PolicyConfig(log_std_min=-2.0))
+    with torch.no_grad():
+        net.log_std.copy_(torch.tensor([-5.0, -5.0]))    # 바닥보다 훨씬 아래로 강제
+    vec, objs, mask = to_tensors(*flatten_obs(sample_obs(0)), net.device)
+    _, log_std, _ = net(vec, objs, mask)
+    assert torch.allclose(log_std, torch.full((2,), -2.0))
+
+
+def test_log_std_min_은_저장하고_불러와도_남는다(tmp_path):
+    net = DrivePolicy(PolicyConfig(trunk=(32, 32), log_std_min=-3.5))
+    path = tmp_path / "policy.pt"
+    net.save(str(path))
+    other = DrivePolicy.load(str(path))
+    assert other.cfg.log_std_min == -3.5
+
+
 def test_완전히_마스크된_물체는_마스크_보호장치를_핀한다():
     """마스크 보호장치(torch.where)가 필요함을 직접 검증.
 

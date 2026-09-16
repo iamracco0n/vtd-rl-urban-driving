@@ -21,6 +21,7 @@ class PolicyConfig:
     obj_out: int = 64
     trunk: tuple = (256, 256)
     log_std_init: float = -1.0
+    log_std_min: float = -2.0       # 조향 표준편차가 무너져 가속 머리를 굶기지 않도록(σ≥0.135, ~8배 차이로 제한)
 
 
 class DrivePolicy(nn.Module):
@@ -49,7 +50,8 @@ class DrivePolicy(nn.Module):
         pooled = torch.where(mask.sum(dim=1, keepdim=True) > 0.0, pooled,
                              torch.zeros_like(pooled))        # 물체가 없으면 0
         z = self.trunk(torch.cat([vec, pooled], dim=-1))
-        return self.mean(z), self.log_std, self.turn(z)
+        log_std = self.log_std.clamp(min=self.cfg.log_std_min)
+        return self.mean(z), log_std, self.turn(z)
 
     @torch.no_grad()
     def act(self, obs: dict, deterministic: bool = True, generator=None) -> dict:

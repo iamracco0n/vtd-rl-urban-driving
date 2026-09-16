@@ -1,11 +1,13 @@
 import json
 import os
 import subprocess
-import sys
+
+import pytest
 
 REPO = os.path.join(os.path.dirname(__file__), "..", "..")
 
 
+@pytest.mark.slow
 def test_연습_모드는_한_바퀴를_끝낸다(tmp_path):
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)

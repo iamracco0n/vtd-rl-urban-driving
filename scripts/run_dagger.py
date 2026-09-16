@@ -45,6 +45,69 @@ def _boards(curriculum, smoke, only=None):
     return [b for b in boards if only is None or b.name == only]
 
 
+def _new_net(smoke, dev):
+    cfg = PolicyConfig(trunk=(64, 64)) if smoke else PolicyConfig()
+    return DrivePolicy(cfg).to(dev)
+
+
+def _teacher_caveat(teacher2: dict) -> str:
+    """단계 ② 선생님의 위반을 감점 시트에서 직접 뽑아 낸다(레포에 박아 넣지 않는다).
+
+    Task 1 에서 이미 본 대로 신호 주기에서는 선생님도 무결하지 않다(빨간불 위반·차선 관련 경미 감점) —
+    그래도 전부 완주한다. "선생님보다 10점 이내"를 비교할 때 그 선생님 점수 자체가 이미 이런 감점을
+    포함한 값임을 밝혀 둔다.
+    """
+    by_board: dict = {}
+    for e in teacher2["episodes"]:
+        for section in e.sheet:
+            for item, grade in section.items():
+                by_board.setdefault(e.board, set()).add((item, grade))
+    if not by_board:
+        return "선생님은 단계 ②(신호 주기)에서도 감점 없이 전부 완주했다."
+    parts = [f"{board} " + ", ".join(f"항목{i}({g})" for i, g in sorted(items))
+             for board, items in sorted(by_board.items())]
+    return ("선생님도 단계 ②(신호 주기)에서 무결하지는 않다 — " + "; ".join(parts) +
+            f" — 그래도 여섯 코스 모두 완주했다(완주율 {teacher2['goal_rate']*100:.0f}%, "
+            f"점수 {teacher2['mean_score']:.1f}).")
+
+
+def _final_outcome_lines(ev1: dict) -> list:
+    by_board: dict = {}
+    for e in ev1["episodes"]:
+        by_board.setdefault(e.board, []).append(f"{e.outcome}({e.steps}보)")
+    lines = ["", "### 마지막 라운드 — 단계 ① 코스별 결과(시드 순)", "",
+             "| 코스 | 결과(걸음수) |", "|---|---|"]
+    for board, outs in by_board.items():
+        lines.append(f"| {board} | {' '.join(outs)} |")
+    return lines
+
+
+def _history_lines(history_paths) -> list:
+    if not history_paths:
+        return []
+    lines = ["", "## 이전 실행(참고 — 결함 있던 파이프라인)", "",
+             "아래는 이번에 고친 결함(라운드마다 웜스타트로 에폭이 쌓임, `log_std` 붕괴)이 있던 상태에서"
+             " 나온 예전 실행이다. 참고용으로 남겨 둔다 — 지금 성적표의 판정 기준이 아니다."]
+    for path in history_paths:
+        rows = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f if line.strip()]
+        except OSError as exc:
+            lines += ["", f"### `{path}` — 읽지 못함: {exc}"]
+            continue
+        lines += ["", f"### `{path}`", "",
+                  "| 라운드 | β | 수집 판(완주) | 누적 표본 | 손실 | 단계 ① 완주율 | 단계 ① 점수 |"
+                  " 단계 ② 완주율 | 단계 ② 점수 |",
+                  "|---:|---:|---|---:|---:|---:|---:|---:|---:|"]
+        for r in rows:
+            lines.append(f"| {r['round']} | {r['beta']} | {r['episodes']}({r['collect_goal']}) | "
+                         f"{r['samples']} | {r['train']['loss']:.3f} | "
+                         f"{r['stage1']['goal_rate']*100:.0f}% | {r['stage1']['mean_score']:.1f} | "
+                         f"{r['stage2']['goal_rate']*100:.0f}% | {r['stage2']['mean_score']:.1f} |")
+    return lines
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -56,17 +119,21 @@ def main():
     ap.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 4))
     ap.add_argument("--device", default="auto")
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--history", action="append", default=[],
+                    help="이전 실행의 log.jsonl 경로(반복 가능) — 성적표에 '이전 실행' 절로 남긴다")
     a = ap.parse_args()
     if a.smoke:
         a.rounds, a.seeds, a.epochs, a.eval_seeds, a.workers = 1, 1, 2, 1, 1
+    if a.rounds < 1:
+        ap.error("--rounds 는 1 이상이어야 한다")
 
     data_dir = os.path.join(a.out, "data")
     os.makedirs(data_dir, exist_ok=True)
     log_path = os.path.join(a.out, "log.jsonl")
     dev = pick_device(a.device)
-    net = DrivePolicy(PolicyConfig(trunk=(64, 64)) if a.smoke else PolicyConfig()).to(dev)
     stage1 = os.path.join(REPO, "curricula", "stage1.json")
     stage2 = os.path.join(REPO, "curricula", "stage2.json")
+    eval_seeds = tuple(range(a.eval_seeds))
     rounds, t0 = [], time.perf_counter()
 
     for rnd in range(a.rounds):
@@ -84,12 +151,17 @@ def main():
         collect_s = time.perf_counter() - t_collect
 
         dataset = load_dir(data_dir)
+        # DAgger 는 라운드마다 누적 데이터셋에 예측기를 "다시" 짓는다 — 이전 라운드 그물을 웜스타트로
+        # 이어 쓰면 라운드마다 에폭이 쌓여(라운드 7 이면 8 라운드 * 8 에폭 = 64 에폭) 조향 log_std 가
+        # 무너지고 가속 머리가 굶는다(수정 라운드 — 측정: 웜스타트 policy-r7 완주율 0%, 새로 지은 그물
+        # 8 에폭 완주율 100%, 같은 데이터). 판을 몰 때 쓰는 이전 라운드 체크포인트(policy_path, β 혼합)는
+        # 그대로 두고, 학습만 매 라운드 새 그물로 한다.
+        net = _new_net(a.smoke, dev)
         train = train_epochs(net, dataset, TrainConfig(epochs=a.epochs, seed=rnd), device=dev)
         net.save(os.path.join(a.out, f"policy-r{rnd}.pt"))
 
-        seeds = tuple(range(a.eval_seeds))
-        ev1 = evaluate_policy(net, _boards(stage1, a.smoke), seeds=seeds)
-        ev2 = evaluate_policy(net, _boards(stage2, a.smoke), seeds=seeds)
+        ev1 = evaluate_policy(net, _boards(stage1, a.smoke), seeds=eval_seeds)
+        ev2 = evaluate_policy(net, _boards(stage2, a.smoke), seeds=eval_seeds)
         row = {"round": rnd, "beta": beta, "episodes": len(metas),
                "collect_goal": sum(1 for m in metas if m["outcome"] == "goal"),
                "samples": len(dataset), "collect_s": collect_s, "train": train,
@@ -99,8 +171,9 @@ def main():
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    teacher1 = evaluate_teacher(_boards(stage1, a.smoke), seeds=(0,))
-    teacher2 = evaluate_teacher(_boards(stage2, a.smoke), seeds=(0,))
+    # 선생님 기준도 학생과 같은 평가 시드로 잰다 — "선생님보다 10점 이내" 가 같은 조건끼리의 비교가 되도록.
+    teacher1 = evaluate_teacher(_boards(stage1, a.smoke), seeds=eval_seeds)
+    teacher2 = evaluate_teacher(_boards(stage2, a.smoke), seeds=eval_seeds)
     last = rounds[-1]
     ok = (last["stage1"]["goal_rate"] >= 0.9
           and last["stage1"]["mean_score"] >= teacher1["mean_score"] - 10.0)
@@ -114,7 +187,8 @@ def main():
         f"- 목표: 단계 ① 완주율 ≥ 90%, 점수가 선생님보다 10점 넘게 낮지 않을 것 → "
         f"**{'달성' if ok else '미달'}**",
         f"- 선생님 기준: 단계 ① 완주율 {teacher1['goal_rate']*100:.0f}% 점수 {teacher1['mean_score']:.1f} · "
-        f"단계 ② 완주율 {teacher2['goal_rate']*100:.0f}% 점수 {teacher2['mean_score']:.1f}", "",
+        f"단계 ② 완주율 {teacher2['goal_rate']*100:.0f}% 점수 {teacher2['mean_score']:.1f}",
+        f"- {_teacher_caveat(teacher2)}", "",
         "| 라운드 | β | 수집 판(완주) | 누적 표본 | 손실 | 단계 ① 완주율 | 단계 ① 점수 | 단계 ② 완주율 | 단계 ② 점수 |",
         "|---:|---:|---|---:|---:|---:|---:|---:|---:|",
     ]
@@ -123,9 +197,11 @@ def main():
                      f"{r['samples']} | {r['train']['loss']:.3f} | "
                      f"{r['stage1']['goal_rate']*100:.0f}% | {r['stage1']['mean_score']:.1f} | "
                      f"{r['stage2']['goal_rate']*100:.0f}% | {r['stage2']['mean_score']:.1f} |")
+    lines += _final_outcome_lines(ev1)
     lines += ["", "학생은 결정적 행동으로 혼자 몬다. 점수는 환경이 낸 구간 점수의 평균이고,",
               "환경의 감점표가 대회 채점기와 같다는 것은 M2a·M2b 성적표에 있다.",
               f"산출물(데이터·체크포인트·로그)은 `{a.out}` 아래에 있고 레포에는 넣지 않는다."]
+    lines += _history_lines(a.history)
     os.makedirs(os.path.dirname(os.path.abspath(a.report)), exist_ok=True)
     with open(a.report, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
