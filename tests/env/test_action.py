@@ -25,6 +25,14 @@ def test_범위를_벗어난_행동은_자른다():
     assert steer == pytest.approx(math.radians(35)) and accel == pytest.approx(-5.0)
 
 
+def test_범위를_벗어난_지시등_색인은_오류():
+    """파이썬 음수 색인은 -1 을 조용히 TS_RIGHT 로 바꾼다 — 여기서 터뜨린다."""
+    cfg = ActionConfig()
+    for bad in (-1, 3, 99):
+        with pytest.raises(ValueError):
+            to_command({"control": np.array([0.0, 0.0], np.float32), "turn": bad}, cfg)
+
+
 def test_역변환은_왕복한다():
     cfg = ActionConfig()
     for steer, accel, turn in [(0.1, 1.0, rs.TS_OFF), (-0.3, -2.0, rs.TS_RIGHT), (0.0, 0.0, rs.TS_LEFT)]:

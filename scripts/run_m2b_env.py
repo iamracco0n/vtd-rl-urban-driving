@@ -11,7 +11,6 @@ import platform
 import sys
 import time
 
-import numpy as np
 from gymnasium.utils.env_checker import check_env
 
 REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -43,6 +42,9 @@ def main():
     _name, boards = load_curriculum(os.path.join(REPO, "curricula", "stage1.json"))
     if a.boards:
         boards = [b for b in boards if b.name in a.boards]
+        if not boards:
+            print(f"판을 찾을 수 없다: {a.boards}", file=sys.stderr)
+            return 2
     rows, checked = [], "통과"
     total_steps, total_wall = 0, 0.0
     with contextlib.redirect_stdout(sys.stderr):
@@ -73,7 +75,7 @@ def main():
         "- 한 걸음 = 판단 10 Hz(시뮬 두 프레임). 심판과 행 기록은 프레임마다 돈다",
         f"- 선생님 걸음 속도: {teacher_hz:.0f} 걸음/s ({1e6 / teacher_hz:.0f} µs/걸음)",
         f"- 무작위 행동 걸음 속도: {rand_hz:.0f} 걸음/s ({1e6 / rand_hz:.0f} µs/걸음)", "",
-        "| 판 | 결과 | 걸음 | 시뮬 시간[s] | 보상 합 | 진행 | 위반 | 승차감 | 심판 감점 | 걸음/s |",
+        "| 판 | 결과 | 걸음 | 시뮬 시간[s] | 보상 합 | 진행 | 위반 | 승차감 | 심판 판정 | 걸음/s |",
         "|---|---|---:|---:|---:|---:|---:|---:|---|---:|",
     ]
     for name, outcome, steps, sim, reward, terms, hits, hz in rows:

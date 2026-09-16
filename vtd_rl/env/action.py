@@ -34,7 +34,12 @@ def to_command(action, cfg: ActionConfig = ActionConfig()):
     steer = float(control[0]) * cfg.max_steer
     a = float(control[1])
     accel = a * cfg.accel_max if a >= 0.0 else a * abs(cfg.accel_min)
-    return steer, accel, TURNS[int(action["turn"])]
+    k = int(action["turn"])
+    # 음수 색인은 파이썬이 조용히 뒤에서부터 센다(-1 -> TS_RIGHT). 지시등이 반대로 켜지는 걸
+    # 나중에 주행 로그에서 찾는 것보다 여기서 소리 내어 터지는 게 낫다.
+    if not 0 <= k < len(TURNS):
+        raise ValueError(f"지시등 색인은 0~{len(TURNS) - 1}: {k}")
+    return steer, accel, TURNS[k]
 
 
 def from_command(steer: float, accel: float, turn: int, cfg: ActionConfig = ActionConfig()):
