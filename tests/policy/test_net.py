@@ -68,24 +68,31 @@ def test_저장하고_불러오면_같은_행동(tmp_path):
     assert other.cfg.trunk == (32, 32)
 
 
-def test_완전히_마스크된_물체는_다른_행동을_준다():
-    """완전히 마스크된 관측과 실제 물체가 있는 관측이 다른 행동을 생성하는지 확인.
+def test_완전히_마스크된_물체는_마스크_보호장치를_핀한다():
+    """마스크 보호장치(torch.where)가 필요함을 직접 검증.
 
-    이는 net.py 의 보호장치(torch.where)가 필요함을 핀한다:
-    완전히 마스크된 경우 NEG_BIG 으로 채워진 값 대신 0을 반환해야 한다.
+    완전히 마스크된 관측에서:
+    - 보호장치 있음: pooled = zeros (정답)
+    - 보호장치 없음: pooled = NEG_BIG fill values (오답)
+
+    이 테스트는 보호장치가 제거되면 즉시 실패한다.
     """
-    net = DrivePolicy()
+    net = DrivePolicy(PolicyConfig(trunk=(32, 32)))
 
-    # 실제 물체가 있는 관측
-    obs1 = sample_obs(5)
-    obs1["object_mask"][0] = 1.0
-    obs1["objects"][0] = 0.5
-    a = net.act(obs1)
+    # 완전히 마스크된 관측 (모든 물체 마스크가 0, 객체 값은 임의)
+    obs = sample_obs(6)
+    obs["object_mask"][:] = 0.0
+    obs["objects"][:] = 12345.0  # 큰 쓰레기값 사용
 
-    # 완전히 마스크된 관측 (모든 물체 마스크가 0)
-    obs2 = sample_obs(5)
-    obs2["object_mask"][:] = 0.0
-    b = net.act(obs2)
+    # 네트워크의 실제 답변
+    vec, objs, mask = to_tensors(*flatten_obs(obs), net.device)
+    mean_actual, log_std_actual, logits_actual = net(vec, objs, mask)
 
-    # 두 행동이 달라야 한다
-    assert not (np.allclose(a["control"], b["control"], atol=1e-6) and a["turn"] == b["turn"])
+    # 예상 답변: pooled = zeros 로 계산
+    z_expected = net.trunk(torch.cat([vec, torch.zeros(1, net.cfg.obj_out, device=net.device)], dim=-1))
+    mean_expected = net.mean(z_expected)
+    logits_expected = net.turn(z_expected)
+
+    # 보호장치가 있을 때만 일치한다
+    assert torch.allclose(mean_actual, mean_expected, atol=1e-6)
+    assert torch.allclose(logits_actual, logits_expected, atol=1e-6)
