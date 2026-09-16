@@ -40,6 +40,15 @@ ROS2 `setup.bash` 를 source 한 셸은 `PYTHONPATH` 에 `/opt/ros/humble/...` �
 
     env -u PYTHONPATH .venv/bin/python scripts/run_m2b_env.py
 
+## 모방학습(DAgger)
+`vtd_rl/policy` 는 규칙 스택을 선생님 삼아 학생 신경망을 학습시킨다. 라운드마다 판을 모으고
+(학생이 몰아도 정답은 그 프레임의 선생님 행동), 쌓인 데이터로 다시 학습한 뒤 학생 단독으로 평가한다.
+결과: [docs/reports/m3-dagger.md](docs/reports/m3-dagger.md)
+
+    env -u PYTHONPATH .venv/bin/python scripts/run_dagger.py --out runs/$(hostname)/$(date +%F)-dagger
+
+데이터·체크포인트는 `runs/` 아래에만 두고 커밋하지 않는다.
+
 ## M1 성적표 다시 만들기
 [docs/reports/m1-stage1-teacher.md](docs/reports/m1-stage1-teacher.md) 는 아래 두 줄로 만든다
 (스텝 속도를 먼저 재고, 그 JSON 을 넘겨 단계 ① 판을 달린다. 주행 CSV 는 `runs/m1/` 에 남고 커밋하지 않는다).
