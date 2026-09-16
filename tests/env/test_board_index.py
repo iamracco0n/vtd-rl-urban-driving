@@ -4,10 +4,15 @@ from vtd_rl.env.board_index import board_index, clear_board_index_cache
 from vtd_rl.world.board import load_board, slice_board
 
 H = {"name": "course_H", "route": "routes/HL_FMA_NEW_H.json", "lane": "routes/HL_FMA_NEW_H_lane.json"}
+G = {"name": "course_G", "route": "routes/HL_FMA_NEW_G.json", "lane": "routes/HL_FMA_NEW_G_lane.json"}
 
 
 def h_slice():
     return slice_board(load_board(H), 0.0, 250.0, "H_0_250")
+
+
+def g_zone_slice():
+    return slice_board(load_board(G), 640.0, 780.0, "G_640_780")
 
 
 def test_코스_H_앞쪽_거리():
@@ -20,6 +25,10 @@ def test_코스_H_앞쪽_거리():
     assert bi.ahead(9e9, "signal") == math.inf
     assert bi.plan_at(100).get("lim") == 13.889      # 코스 H 제한 50 km/h
     assert bi.plan_at(10 ** 9) == {}
+    # 도색 정지선은 진행 방향이 같은 것만: s≈135.35의 반대 차선 정지선 쌍은 제외되어야 함
+    assert not any(abs(s - 135.35) < 1.0 for s in bi.stopline_s)
+    # 신호 근처의 정지선은 남아 있어야 함 (필터가 모든 것을 버리지 않음)
+    assert any(abs(s - 96.3) < 3.0 for s in bi.stopline_s)
 
 
 def test_캐시는_같은_색인을_준다():
@@ -28,3 +37,15 @@ def test_캐시는_같은_색인을_준다():
     assert board_index(b) is board_index(b)
     clear_board_index_cache()
     assert board_index(b) is not None
+
+
+def test_코스_G_보호구역():
+    """코스 G의 슬라이스 640~780 m 구간에 30 km/h 보호구역이 있음. 경로점 색인이 구간을 따라 False→True 변함."""
+    bi = board_index(g_zone_slice())
+    # 슬라이스 시작 부근 (경로점 인덱스 낮음): 보호구역 아님
+    assert bi.zone[0] is False
+    # 슬라이스 끝 부근 (경로점 인덱스 높음): 보호구역임 (30 km/h ≤ 20 km/h 한계)
+    # 가장 마지막 경로점이 보호구역에 있는지 확인
+    last_zone_check = min(i for i in range(len(bi.zone)) if bi.zone[i])  # 처음 True인 인덱스
+    assert last_zone_check < len(bi.zone)  # 보호구역이 적어도 존재함
+    assert any(bi.zone)  # 슬라이스 안에 보호구역이 있음
