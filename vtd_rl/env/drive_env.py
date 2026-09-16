@@ -20,6 +20,7 @@ from vtd_rl.env.action import ActionConfig, action_space, frames_per_step, to_co
 from vtd_rl.env.board_index import board_index
 from vtd_rl.env.observation import ObsConfig, build_observation, observation_space
 from vtd_rl.env.reward import COLLISION_ITEMS, RewardConfig, RewardShaper
+from vtd_rl.env.tags import RL, world_cap_by
 from vtd_rl.referee.core import Referee
 from vtd_rl.referee.rows import RowRecorder
 from vtd_rl.world.world import World, WorldConfig
@@ -51,9 +52,14 @@ class VtdDriveEnv(gym.Env):
         self.action_space = action_space(self.cfg.action)
         self.frames = frames_per_step(self.cfg.action, self.cfg.world.dt)
         self.frame_hook = None
+        # 프레임마다 (reason, cap_by) 를 주는 갈고리. 규칙 스택이 운전할 때는 스택이 내는 진짜
+        # 태그를 그대로 넘겨야 채점기 ⑧ 면책이 살아난다(TeacherPolicy 가 건다). 안 걸려 있으면
+        # 세계의 물체에서 짓는다(env/tags.py) — 태그는 채점기가 어차피 면책할 정차만 면책한다.
+        self.command_tags = None
         self.board = self.world = self.referee = self.state = None
         self._worlds: dict = {}          # 판마다 세계를 다시 짓지 않는다(신호 찾기가 판당 수십 ms)
         self._episode = 0
+        self.episode = 0                 # 리셋마다 오르는 번호 — 판 이름만으로는 판 바뀜을 못 본다
         self._recorder = None
         self._info = None
         self._prev_action = self._zero_action()
@@ -80,6 +86,9 @@ class VtdDriveEnv(gym.Env):
             idx = board_index(self.board)
             self.world = self._worlds[self.board.name] = World(
                 self.board, self.cfg.world, signals=idx.signals, seed=world_seed)
+        # 세계 캐시의 열쇠는 판 **이름**이다 — 이름만 같고 다른 판이 섞이면 관측·심판은 이 판을,
+        # 세계는 저 판을 보게 된다. 조용히 갈라지지 않게 여기서 못을 박는다.
+        assert self.world.board is self.board, f"세계 캐시가 다른 판을 준다: {self.board.name}"
         self.state = self.world.reset(world_seed)
         self.referee = Referee(self.board, self.cfg.sections, self.cfg.use_map)
         self._shaper = RewardShaper(self.board, self.cfg.reward)
@@ -87,7 +96,8 @@ class VtdDriveEnv(gym.Env):
         self._info = None
         self._prev_action = self._zero_action()
         self._episode += 1
-        self._recorder = RowRecorder(self._csv_path())
+        self.episode = self._episode
+        self._recorder = None            # 행 CSV 는 첫 record 에서 연다(밟지 않은 리셋은 파일도 안 남긴다)
         self._done = False
         self._terminal = None
         obs = build_observation(self.world, self.state, self._info, self._prev_pair(), self.cfg.obs)
@@ -100,15 +110,16 @@ class VtdDriveEnv(gym.Env):
         if self._done:
             return self._frozen_step()
         steer, accel, turn = to_command(action, self.cfg.action)
-        cmd = rs.Command(steer=steer, accel=accel, turn=turn, reason="RL", cap_by="RL")
+        cmd = rs.Command(steer=steer, accel=accel, turn=turn, reason=RL, cap_by=RL)
         s0 = self._info.s if self._info is not None else 0.0
         hits, frames, outcome = [], 0, RUNNING
         for _ in range(self.frames):
             if self.frame_hook is not None:
                 self.frame_hook(self.state, self.world.clock)
             cmd.d_ego = self._info.lateral if self._info is not None else 0.0
+            cmd.reason, cmd.cap_by = self._tags()        # 프레임마다 — 갈고리는 그 프레임의 답을 준다
             self.state.speed = self.world.ego.v          # 로그 속도의 주인은 세계다
-            hits += self.referee.step(self._recorder.record(self.world.t, self.state, cmd))
+            hits += self.referee.step(self._rows().record(self.world.t, self.state, cmd))
             self.state, self._info = self.world.step(steer, accel, turn)
             frames += 1
             if self._info.done:
@@ -121,7 +132,8 @@ class VtdDriveEnv(gym.Env):
         self._prev_action = {"control": np.asarray(action["control"], dtype=np.float32).copy(),
                              "turn": int(action["turn"])}
         terminated = outcome in ("goal", "offroad") or shaped.collision
-        truncated = outcome in ("timeout", "stalled")
+        # 둘이 함께 참이면 안 된다(Gymnasium 규약) — 충돌과 시간초과가 같은 걸음에 올 수 있다
+        truncated = outcome in ("timeout", "stalled") and not terminated
         if outcome == RUNNING and shaped.collision:
             outcome = "collision"        # 세계는 충돌을 모른다 — 심판이 낸 충돌 항목이 종료 사유다
         info = {"board": self.board.name, "outcome": outcome, "s": self._info.s,
@@ -158,6 +170,19 @@ class VtdDriveEnv(gym.Env):
     def _prev_pair(self):
         return (float(self._prev_action["control"][0]), float(self._prev_action["control"][1]),
                 int(self._prev_action["turn"]))
+
+    def _tags(self):
+        """이 프레임의 (reason, cap_by) — 채점기 ⑧ 면책 판정이 읽는 두 칸."""
+        if self.command_tags is not None:
+            reason, cap_by = self.command_tags()
+            return str(reason), str(cap_by)
+        return RL, world_cap_by(self.state)
+
+    def _rows(self):
+        """행 기록기 — 첫 record 에서 연다. 밟지 않은 리셋이 머리글만 든 CSV 를 남기지 않게."""
+        if self._recorder is None:
+            self._recorder = RowRecorder(self._csv_path())
+        return self._recorder
 
     def _csv_path(self):
         if not self.cfg.log_dir:

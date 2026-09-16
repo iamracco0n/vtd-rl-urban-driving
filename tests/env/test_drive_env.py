@@ -83,6 +83,7 @@ def test_판이_끝나면_성적이_따라온다():
         if term or trunc:
             break
     assert info["outcome"] in ("goal", "offroad", "timeout", "stalled", "collision")
+    assert not (term and trunc)                  # Gymnasium 규약 — 둘이 함께 참이면 안 된다
     assert "result" in info and "sheet" in info["result"]
     assert len(info["result"]["sheet"]) == 5
     env.close()
@@ -100,6 +101,39 @@ def test_행_CSV_남기기(tmp_path):
     assert lines[0].startswith("t,x,y,heading,v")
     assert len(lines) == 5 * 2 + 1        # 머리글 + 시뮬 프레임마다 한 행(걸음마다 두 프레임)
     env.close()
+
+
+def test_밟지_않은_리셋은_CSV_를_남기지_않는다(tmp_path):
+    """행 CSV 는 첫 record 에서 연다 — 리셋만 하고 버린 판이 머리글뿐인 파일을 남기지 않게."""
+    env = VtdDriveEnv([boards()[0]], EnvConfig(log_dir=str(tmp_path)))
+    env.reset(seed=0)
+    env.reset(seed=1)
+    assert list(tmp_path.iterdir()) == []
+    env.step({"control": np.array([0.0, 0.5], np.float32), "turn": 0})
+    assert [p.name for p in tmp_path.iterdir()] == ["H_0_250-0002.csv"]
+    env.close()
+
+
+def test_종료_걸쇠는_terminated_와_truncated_를_함께_켜지_않는다():
+    """충돌(terminated)과 시간초과(truncated)가 **같은 걸음**에 와도 하나만 켜진다(Gymnasium 규약)."""
+    def ram(time_limit=None):
+        env = VtdDriveEnv([rammer_board()])
+        env.reset(seed=0)
+        if time_limit is not None:
+            env.world.time_limit = time_limit
+        for _ in range(300):
+            _o, _r, term, trunc, info = env.step(
+                {"control": np.array([0.0, 1.0], np.float32), "turn": 0})
+            if term or trunc:
+                break
+        env.close()
+        return term, trunc, info
+
+    _term, _trunc, hit_info = ram()
+    term, trunc, info = ram(time_limit=hit_info["sim_time"])   # 충돌하는 그 걸음에 시간초과를 맞춘다
+    assert info["outcome"] == "timeout"                        # 세계는 시간초과라고 했고
+    assert 14 in {h[2] for h in info["hits"]}                  # 같은 걸음에 충돌 판정도 났다
+    assert (term, trunc) == (True, False)                      # 그래도 둘이 함께 켜지지는 않는다
 
 
 def test_frame_hook은_시뮬_프레임마다_불린다():
