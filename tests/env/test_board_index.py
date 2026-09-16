@@ -1,5 +1,7 @@
 import math
 
+import pytest
+
 from vtd_rl.env.board_index import board_index, clear_board_index_cache
 from vtd_rl.world.board import load_board, slice_board
 
@@ -29,6 +31,22 @@ def test_코스_H_앞쪽_거리():
     assert not any(abs(s - 135.35) < 1.0 for s in bi.stopline_s)
     # 신호 근처의 정지선은 남아 있어야 함 (필터가 모든 것을 버리지 않음)
     assert any(abs(s - 96.3) < 3.0 for s in bi.stopline_s)
+
+
+def test_교차로는_묶음마다_하나():
+    """`j`/`jx` 가 이어지는 묶음의 **첫 점**만 남긴다 — 안 그러면 교차로 안에서 거리가 0 에 붙는다."""
+    bi = board_index(h_slice())
+    assert len(bi.junction_s) == 1                   # 코스 H 앞 250 m 에는 교차로 하나(96.5~135.2 m)
+    assert abs(bi.junction_s[0] - 96.5) < 1.0
+    assert bi.ahead(0.0, "junction") == pytest.approx(bi.junction_s[0])
+    assert bi.ahead(100.0, "junction") == math.inf   # 묶음 안에서는 '다음 교차로'가 없다
+
+
+def test_모르는_종류는_명확한_오류():
+    bi = board_index(h_slice())
+    with pytest.raises(ValueError) as e:
+        bi.ahead(0.0, "없는것")
+    assert "junction" in str(e.value) and "signal" in str(e.value)
 
 
 def test_캐시는_같은_색인을_준다():

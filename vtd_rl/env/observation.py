@@ -28,7 +28,6 @@ class ObsConfig:
     lat_max: float = 5.0             # 횡오프셋 정규화[m]
     room_max: float = 8.0            # 차로 여유 정규화[m]
     dist_max: float = 100.0          # 앞쪽 거리 정규화[m]
-    remain_max: float = 1000.0       # 남은 거리 정규화[m]
     obj_x: float = 80.0              # 물체 전후 정규화[m] — World.object_range(9910 수평 범위)와 맞춘다
     obj_y: float = 20.0              # 물체 좌우 정규화[m]
     obj_size: float = 12.0           # 물체 치수 정규화[m]
@@ -99,8 +98,10 @@ def build_observation(world, state, info, prev_action, cfg: ObsConfig = ObsConfi
         pts[k, 1] = _clip(dx * sin_h + dy * cos_h, cfg.route_ahead)
 
     heading_err = (route.heading_at(index) - ego.heading + math.pi) % (2.0 * math.pi) - math.pi
+    # 남은 거리는 **그 판의 경로 길이**로 나눈다(1 = 출발, 0 = 끝). 고정 1000 m 로 나누면
+    # 단계 ① 경로(2152~5242 m)에서는 판의 절반~8할 동안 1.0 에 붙어 죽은 값이 된다.
     nav = [_clip(lateral, cfg.lat_max), _clip(heading_err, math.pi),
-           _clip(route.total - s, cfg.remain_max)]
+           _clip(route.total - s, max(route.total, 1.0))]
 
     sig_dir = plan.get("sig") or 0
     plan_vec = [_clip(plan.get("w") or 0.0, cfg.room_max),
@@ -112,7 +113,7 @@ def build_observation(world, state, info, prev_action, cfg: ObsConfig = ObsConfi
                 1.0 if plan.get("j") else 0.0,
                 1.0 if sig_dir > 0 else 0.0,
                 1.0 if sig_dir < 0 else 0.0,
-                _clip(idx.ahead(s, "signal"), cfg.dist_max)]
+                _clip(idx.ahead(s, "junction"), cfg.dist_max)]   # 다음 교차로까지(신호 거리는 signal 묶음에)
 
     signal = [0.0] * TL_STATES
     tl_state = int(state.tl_state) if 0 <= int(state.tl_state) < TL_STATES else 0

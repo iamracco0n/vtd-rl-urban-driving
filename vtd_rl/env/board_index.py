@@ -22,8 +22,24 @@ class BoardIndex:
         self.crosswalk_s = self._project(route, [(c["x"], c["y"]) for c in db["crosswalks"]])
         self.stopline_s = self._project_stoplines(route, db["stoplines_all"])
         self.zone = [bool(p and (p.get("lim") or 99.0) <= ZONE_LIM) for p in board.lane_plan]
+        self.junction_s = self._junctions(route, board.lane_plan)
         self._kinds = {"signal": self.signal_s, "crosswalk": self.crosswalk_s,
-                       "stopline": self.stopline_s}
+                       "stopline": self.stopline_s, "junction": self.junction_s}
+
+    @staticmethod
+    def _junctions(route, lane_plan):
+        """교차로 **구간이 시작하는** s [m] — 차로계획의 `j`/`jx` 가 이어지는 묶음마다 하나.
+
+        교차로는 경로점 수십 개에 걸쳐 켜져 있으므로 점마다 넣으면 '다음 교차로까지'가
+        구간 안에서 0 에 붙어 버린다. 묶음의 첫 점만 남긴다.
+        """
+        out, prev = [], False
+        for i, p in enumerate(lane_plan):
+            cur = bool(p and (p.get("j") or p.get("jx")))
+            if cur and not prev:
+                out.append(route.cum[i])
+            prev = cur
+        return out
 
     @staticmethod
     def _project(route, points):
@@ -54,7 +70,9 @@ class BoardIndex:
         return sorted(out)
 
     def ahead(self, s: float, kind: str) -> float:
-        xs = self._kinds[kind]
+        xs = self._kinds.get(kind)
+        if xs is None:
+            raise ValueError(f"모르는 종류: {kind!r} (있는 것: {sorted(self._kinds)})")
         i = bisect.bisect_left(xs, s)
         return xs[i] - s if i < len(xs) else math.inf
 
