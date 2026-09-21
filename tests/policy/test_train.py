@@ -4,7 +4,7 @@ import torch
 from vtd_rl.policy.dataset import DaggerDataset, Shard
 from vtd_rl.policy.encode import OBJ_DIM, OBJ_N, VEC_DIM
 from vtd_rl.policy.net import DrivePolicy, PolicyConfig
-from vtd_rl.policy.train import TrainConfig, evaluate_labels, train_epochs
+from vtd_rl.policy.train import TrainConfig, evaluate_labels, policy_loss, train_epochs
 
 
 def toy_dataset(n=512, seed=0):
@@ -64,3 +64,26 @@ def test_학습_뒤에도_log_std_범위를_지킨다():
     train_epochs(net, toy_dataset(64), TrainConfig(epochs=2, batch_size=32))
     assert torch.all(net.log_std >= net.cfg.log_std_min - 1e-6)
     assert torch.all(net.log_std <= net.cfg.log_std_max + 1e-6)
+
+
+def test_시그마를_분리하면_log_std에_기울기가_안_간다():
+    torch.manual_seed(0)
+    net = DrivePolicy(PolicyConfig(trunk=(32, 32)))
+    batch = next(iter(toy_dataset(64).batches(32, generator=torch.Generator().manual_seed(0))))
+
+    net.zero_grad()
+    policy_loss(net, batch, TrainConfig(sigma_grad=True))[0].backward()
+    assert net.log_std.grad is not None and torch.any(net.log_std.grad != 0.0)
+    learn_mean_grad = net.mean.weight.grad.clone()
+
+    net.zero_grad()
+    policy_loss(net, batch, TrainConfig(sigma_grad=False))[0].backward()
+    assert net.log_std.grad is None or torch.all(net.log_std.grad == 0.0)
+    # 평균 쪽 기울기는 살아 있어야 한다 — σ 만 떼는 것이지 모방을 끄는 게 아니다
+    assert torch.any(net.mean.weight.grad != 0.0)
+    # 그리고 σ 를 상수로 본 만큼 평균 기울기의 방향이 달라지지는 않는다(같은 var 로 나눈다)
+    assert torch.allclose(net.mean.weight.grad, learn_mean_grad, atol=1e-6)
+
+
+def test_시그마_분리_기본값은_학습이다():
+    assert TrainConfig().sigma_grad is True
