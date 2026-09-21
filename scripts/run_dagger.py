@@ -27,7 +27,7 @@ from vtd_rl import rule_stack as rs  # noqa: E402
 from vtd_rl.policy import device as pick_device  # noqa: E402
 from vtd_rl.policy.collect import collect_episode  # noqa: E402
 from vtd_rl.policy.dataset import load_dir, load_shard, save_shard  # noqa: E402
-from vtd_rl.policy.evaluate import evaluate_policy, evaluate_teacher  # noqa: E402
+from vtd_rl.policy.evaluate import evaluate_policy, evaluate_teacher, violation_counts  # noqa: E402
 from vtd_rl.policy.net import DrivePolicy, PolicyConfig  # noqa: E402
 from vtd_rl.policy.train import TrainConfig, train_epochs  # noqa: E402
 from vtd_rl.world.board import load_board, load_curriculum, slice_board  # noqa: E402
@@ -86,24 +86,12 @@ def _distinct_episodes(ev: dict) -> int:
     return len({(e.board, e.outcome, e.steps) for e in ev["episodes"]})
 
 
-def _violation_counts(ev: dict) -> dict:
-    """항목 -> {minor 수, major 수} — 구간-슬롯 단위로 센다(판마다 5구간, 항목은 구간별 채점표)."""
-    counts: dict = {}
-    for e in ev["episodes"]:
-        for section in e.sheet:
-            for item, grade in section.items():
-                d = counts.setdefault(item, {"minor": 0, "major": 0})
-                if grade in d:
-                    d[grade] += 1
-    return counts
-
-
 def _violation_lines(stage_label: str, student_ev: dict, teacher_ev: dict) -> list:
     """마지막 라운드 학생 대 선생님, 항목별 위반 — 완주율·평균 점수만 보면 안 보이는 규칙 위반
 
     차이를 남긴다(정지한 차는 대부분의 항목을 안 어겨서 점수만으로는 안 보인다).
     """
-    sc, tc = _violation_counts(student_ev), _violation_counts(teacher_ev)
+    sc, tc = violation_counts(student_ev), violation_counts(teacher_ev)
     items = sorted(set(sc) | set(tc))
     lines = ["", f"### {stage_label} — 항목별 위반(구간-슬롯 수, 마지막 라운드)"]
     if not items:

@@ -49,6 +49,22 @@ ROS2 `setup.bash` 를 source 한 셸은 `PYTHONPATH` 에 `/opt/ros/humble/...` �
 
 데이터·체크포인트는 `runs/` 아래에만 두고 커밋하지 않는다.
 
+## 강화학습(PPO)
+`vtd_rl/rl` 은 M3 모방학습 학생을 출발점으로 PPO 를 돌린다. 보상은 온라인 심판의 감점이고,
+단계 ①(항상 초록)과 ②(신호 주기) 판을 섞어 학습한다. 결과: [docs/reports/m4a-ppo.md](docs/reports/m4a-ppo.md)
+
+    env -u PYTHONPATH .venv/bin/python scripts/train_ppo.py --out runs/$(hostname)/$(date +%F)-ppo \
+      --init <M3 체크포인트> --dagger-data <M3 데이터 폴더>
+
+성적표는 `scripts/report_m4a.py` 가 위 실행이 남긴 `log.jsonl`·`ac-best.pt` 만으로 만든다(숫자를
+손으로 옮겨 적지 않는다) — M3 체크포인트와 선생님 대비 표, 항목별 위반 표, 목표 네 줄 판정까지 전부
+그 스크립트의 산출물이다.
+
+    env -u PYTHONPATH .venv/bin/python scripts/report_m4a.py --run runs/omen/<날짜>-ppo \
+      --m3 <M3 체크포인트> --out docs/reports/m4a-ppo.md --eval-seeds 3
+
+데이터·체크포인트는 `runs/` 아래에만 두고 커밋하지 않는다.
+
 ## M1 성적표 다시 만들기
 [docs/reports/m1-stage1-teacher.md](docs/reports/m1-stage1-teacher.md) 는 아래 두 줄로 만든다
 (스텝 속도를 먼저 재고, 그 JSON 을 넘겨 단계 ① 판을 달린다. 주행 CSV 는 `runs/m1/` 에 남고 커밋하지 않는다).

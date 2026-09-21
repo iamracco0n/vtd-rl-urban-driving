@@ -58,6 +58,18 @@ def evaluate_policy(policy, boards, seeds=(0, 1, 2), config: EnvConfig | None = 
     return _summary(episodes)
 
 
+def violation_counts(ev: dict) -> dict:
+    """항목 -> {minor 수, major 수} — 구간-슬롯 단위로 센다(판마다 5구간, 항목은 구간별 채점표)."""
+    counts: dict = {}
+    for e in ev["episodes"]:
+        for section in e.sheet:
+            for item, grade in section.items():
+                d = counts.setdefault(item, {"minor": 0, "major": 0})
+                if grade in d:
+                    d[grade] += 1
+    return counts
+
+
 def evaluate_teacher(boards, seeds=(0,), config: EnvConfig | None = None) -> dict:
     env = VtdDriveEnv(list(boards), config or EnvConfig())
     episodes = []
