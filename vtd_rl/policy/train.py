@@ -49,6 +49,7 @@ def train_epochs(net, dataset, cfg: TrainConfig = TrainConfig(), device=None, lo
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), cfg.grad_clip)
             opt.step()
+            net.clamp_log_std()      # forward 는 안 자르므로 최적화 한 걸음 뒤 여기서 지킨다
             for k in sums:
                 sums[k] += parts[k]
             batches += 1

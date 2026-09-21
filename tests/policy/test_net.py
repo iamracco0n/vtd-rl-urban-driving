@@ -69,9 +69,13 @@ def test_저장하고_불러오면_같은_행동(tmp_path):
 
 
 def test_log_std_는_바닥_아래로_안_내려간다():
+    # forward 는 더 이상 자르지 않는다(M4 준비 — 기울기 보존). 범위는 최적화 한 걸음 뒤에
+    # clamp_log_std() 가 지킨다. tests/rl/test_policy_fixes.py 에 기울기 보존 자체를 검증하는
+    # 테스트가 따로 있다.
     net = DrivePolicy(PolicyConfig(log_std_min=-2.0))
     with torch.no_grad():
         net.log_std.copy_(torch.tensor([-5.0, -5.0]))    # 바닥보다 훨씬 아래로 강제
+    net.clamp_log_std()
     vec, objs, mask = to_tensors(*flatten_obs(sample_obs(0)), net.device)
     _, log_std, _ = net(vec, objs, mask)
     assert torch.allclose(log_std, torch.full((2,), -2.0))

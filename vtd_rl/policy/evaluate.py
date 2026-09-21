@@ -21,8 +21,11 @@ class EpisodeOutcome:
 
 def _summary(episodes) -> dict:
     n = max(len(episodes), 1)
+    # 완주하지 못한 판은 0점으로 친다 — 멈춰 선 차는 위반을 안 해 점수가 오히려 높다(M3 관찰).
+    scored = [e.score if e.outcome == "goal" else 0.0 for e in episodes]
     return {"goal_rate": sum(1 for e in episodes if e.outcome == "goal") / n,
-            "mean_score": sum(e.score for e in episodes) / n,
+            "mean_score": sum(scored) / n,
+            "mean_score_raw": sum(e.score for e in episodes) / n,
             "mean_reward": sum(e.reward for e in episodes) / n,
             "episodes": episodes}
 
@@ -53,6 +56,18 @@ def evaluate_policy(policy, boards, seeds=(0, 1, 2), config: EnvConfig | None = 
     finally:
         env.close()
     return _summary(episodes)
+
+
+def violation_counts(ev: dict) -> dict:
+    """항목 -> {minor 수, major 수} — 구간-슬롯 단위로 센다(판마다 5구간, 항목은 구간별 채점표)."""
+    counts: dict = {}
+    for e in ev["episodes"]:
+        for section in e.sheet:
+            for item, grade in section.items():
+                d = counts.setdefault(item, {"minor": 0, "major": 0})
+                if grade in d:
+                    d[grade] += 1
+    return counts
 
 
 def evaluate_teacher(boards, seeds=(0,), config: EnvConfig | None = None) -> dict:
