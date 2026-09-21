@@ -152,3 +152,46 @@ def test_같은_폴더에_두_번_쓰지_않는다(tmp_path):
     assert first.returncode == 0
     second = subprocess.run(args, capture_output=True, text=True, env=env, cwd=REPO, timeout=300)
     assert second.returncode != 0 and "이미" in (second.stderr + second.stdout)
+
+
+@pytest.mark.slow
+def test_연습_모드가_계측과_판정을_남긴다(tmp_path):
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    out = subprocess.run([os.path.join(REPO, ".venv", "bin", "python"),
+                          os.path.join(REPO, "scripts", "train_ppo.py"),
+                          "--smoke", "--out", str(tmp_path / "run"), "--seed", "0",
+                          "--imitation-sigma", "detach"],
+                         capture_output=True, text=True, env=env, cwd=REPO, timeout=1800)
+    assert out.returncode == 0, out.stderr[-3000:]
+    summary = json.loads(out.stdout.strip().splitlines()[-1])
+
+    assert summary["hparams"]["imitation_sigma"] == "detach"
+    assert len(summary["verdict"]) == 4
+    assert {v["name"] for v in summary["verdict"]} == {
+        "완주율", "선생님 대비 점수", "출발점 대비 점수", "전 항목 중대 위반"}
+    assert all(isinstance(v["ok"], bool) and v["line"] for v in summary["verdict"])
+
+    rows = [json.loads(l) for l in open(tmp_path / "run" / "log.jsonl", encoding="utf-8")]
+    assert rows, "log.jsonl 이 비어 있다"
+    for r in rows:
+        for k in ("rollout_return_mean", "rollout_return_n", "rollout_len_mean",
+                  "drift_l2", "drift_rel", "drift_log_std", "drift_rest_rel"):
+            assert k in r, k
+    assert any(r["rollout_return_n"] > 0 for r in rows), "끝난 판이 한 번도 안 잡혔다"
+    # 드리프트는 처음엔 0 에 가깝고 학습이 돌수록 커진다. `drift_log_std` 를 `drift_l2` 와
+    # 따로 확인한다 — `drift_l2`(전체망 노름)만 보면 `drift_log_std` 를 로그에서 빼거나 항상
+    # 0 으로 찍어도 못 잡는다(trunk 수만 파라미터에 묻힌다, diagnostics.py `policy_drift` 참고
+    # — M4b 설계에서 "가장 중요하다"고 지목한 값이라 별도 단언을 둔다).
+    assert rows[0]["drift_l2"] < rows[-1]["drift_l2"]
+    assert rows[0]["drift_log_std"] < rows[-1]["drift_log_std"]
+    evals = [r for r in rows if "stages" in r]
+    assert evals and any(k.startswith("outcome_") for k in evals[-1])
+
+
+def test_시그마_모드가_cfg에_닿는다():
+    mod = _load_train_ppo_module()   # 이 파일이 이미 쓰는 importlib 헬퍼(이름 그대로)
+    a = mod._build_parser().parse_args(["--out", "x", "--imitation-sigma", "detach"])
+    assert mod._build_cfg(a).imitation_sigma == "detach"
+    b = mod._build_parser().parse_args(["--out", "x"])
+    assert mod._build_cfg(b).imitation_sigma == "learn"
