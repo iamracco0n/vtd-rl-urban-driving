@@ -9,6 +9,7 @@ import torch
 
 from vtd_rl.rl.actor_critic import ActorCritic
 from vtd_rl.rl.buffer import RolloutBuffer
+from vtd_rl.rl.ppo import PPOConfig
 
 REPO = os.path.join(os.path.dirname(__file__), "..", "..")
 
@@ -23,6 +24,46 @@ def _load_train_ppo_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_인자를_안_주면_PPOConfig_기본값과_같다():
+    """`--entropy-coef`/`--lr`/`--target-kl`/`--imitation-half-life` 를 하나도 안 주면
+
+    `_build_cfg` 가 만드는 `cfg` 는 `PPOConfig()` 와 완전히 같아야 한다 — CLI 로 여는 것
+    자체가 기본 동작을 바꾸면 안 된다(2026-09-21 지시: "아무 인자도 안 주면 동작이 지금과
+    100% 같아야 한다").
+    """
+    module = _load_train_ppo_module()
+    a = module._build_parser().parse_args(["--out", "/tmp/불필요-존재안함"])
+    cfg = module._build_cfg(a)
+    assert cfg == PPOConfig()
+
+
+def test_하이퍼파라미터_인자가_cfg와_옵티마이저에_실제로_반영된다():
+    """"인자가 파싱된다"만 보는 공허한 테스트가 되지 않도록, 실제 `torch.optim.Adam` 을 만들어
+
+    `opt.param_groups[0]["lr"]` 을 직접 본다 — 이 프로젝트에서 `PPOConfig.gamma`/`lam` 이
+    `ppo.update()` 에 안 쓰여 조용히 무시된 적이 있어(`compute_gae` 호출부), `--lr` 도 같은
+    함정(옵티마이저가 하드코딩된 값을 쓰는)에 빠질 수 있다는 게 코디네이터의 우려였다.
+    """
+    module = _load_train_ppo_module()
+    a = module._build_parser().parse_args([
+        "--out", "/tmp/불필요-존재안함", "--lr", "0.00013", "--entropy-coef", "0.2",
+        "--target-kl", "0.5", "--imitation-half-life", "12345"])
+    cfg = module._build_cfg(a)
+    assert cfg.lr == 0.00013
+    assert cfg.entropy_coef == 0.2
+    assert cfg.target_kl == 0.5
+    assert cfg.imitation_half_life == 12345
+    # 안 건드린 필드는 그대로(네 필드만 골라 바꿨다는 확인).
+    default_cfg = PPOConfig()
+    assert cfg.clip == default_cfg.clip and cfg.gamma == default_cfg.gamma
+    assert cfg.lam == default_cfg.lam and cfg.value_coef == default_cfg.value_coef
+
+    # main() 이 실제로 쓰는 그 함수로 옵티마이저를 만들어 lr 이 진짜로 닿는지 본다.
+    net = module.ActorCritic()
+    opt = module._build_optimizer(net, cfg)
+    assert opt.param_groups[0]["lr"] == 0.00013
 
 
 def test_자동_리셋_더미_행이_GAE_사슬을_끊는다():
@@ -93,6 +134,9 @@ def test_연습_모드가_한_바퀴를_끝낸다(tmp_path):
     assert len(last_row["log_std"]) == 2
     assert math.isfinite(last_row["explained_variance"])
     assert "stage1" in last_row["stages"]
+    # 이번 실행에 쓴 하이퍼파라미터가 산출물(log.jsonl·요약 JSON)에 실제로 남는지.
+    assert last_row["hparams"]["lr"] == pytest.approx(0.0003)
+    assert "hparams" in summary and summary["hparams"]["entropy_coef"] == pytest.approx(0.005)
 
     ActorCritic.load(str(best_path))   # ac-best.pt 가 실제로 ActorCritic 으로 읽혀야 한다
 

@@ -21,6 +21,7 @@
 2.7 분뿐이라, 주기 평가를 매번 전체 시드로 하면 평가가 학습보다 몇 배 더 걸린다.
 """
 import argparse
+import dataclasses
 import glob
 import json
 import os
@@ -121,7 +122,8 @@ def _bootstrap_reward_done(reward, term, prev_done, value: torch.Tensor):
     return reward_t, done_t
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
+    default_cfg = PPOConfig()   # 아래 네 개 CLI 기본값의 유일한 출처 — 숫자를 여기 따로 못박지 않는다.
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--init", default=None,
@@ -143,8 +145,46 @@ def main():
     ap.add_argument("--dagger-data", default=None, help="M3 가 모은 조각 폴더(runs/.../data)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto")
+    # 2026-09-21 본 학습(OMEN 3M 스텝) 진단: log_std[0](조향) 이 처음부터 끝까지 하한 -2.0 에
+    # 붙어 탐색이 전혀 없었고, approx_kl 이 내내 target_kl 아래라 조기 종료가 한 번도 안 걸렸다
+    # — 모방 NLL(~3.84)이 기본 엔트로피 보너스(~0.0096)를 400배 압도한다는 Task 5 리뷰의 예측
+    # 그대로다. 이 네 개를 CLI 로 열어야 원인을 갈라 시험할 수 있다. 기본값은 `PPOConfig()` 자신의
+    # 기본값이므로 아무 인자도 안 주면 지금 동작과 100% 같다.
+    ap.add_argument("--entropy-coef", type=float, default=default_cfg.entropy_coef,
+                    help="엔트로피 보너스 계수 — 키우면 log_std 하한 붙박이를 밀어낼 수 있다")
+    ap.add_argument("--lr", type=float, default=default_cfg.lr, help="Adam 학습률")
+    ap.add_argument("--target-kl", type=float, default=default_cfg.target_kl,
+                    help="이 KL 을 넘으면 그 에폭에서 조기 종료한다 — 낮추면 정책 표류를 더 세게 막는다")
+    ap.add_argument("--imitation-half-life", type=int, default=default_cfg.imitation_half_life,
+                    help="모방 손실 계수가 절반으로 줄어드는 스텝 수 — 줄이면 PPO 가 더 일찍 선생님을 떠난다")
     ap.add_argument("--smoke", action="store_true",
                     help="환경 2개·스텝 4000·롤아웃 64·동기 벡터 환경·평가는 각 단계 코스 A 한 판씩 시드 1개")
+    return ap
+
+
+def _build_cfg(a) -> PPOConfig:
+    """`PPOConfig` 는 frozen dataclass 라 `dataclasses.replace` 로 CLI 로 연 네 필드만 덮어쓴다.
+
+    인자를 하나도 안 주면 `a.lr`/`a.entropy_coef`/`a.target_kl`/`a.imitation_half_life` 가 이미
+    `PPOConfig()` 자신의 기본값이므로(위 `_build_parser` 참고) 이 함수가 만드는 `cfg` 는
+    `PPOConfig()` 와 완전히 같다 — 기본 동작이 안 바뀐다.
+    """
+    return dataclasses.replace(PPOConfig(), lr=a.lr, entropy_coef=a.entropy_coef,
+                               target_kl=a.target_kl, imitation_half_life=a.imitation_half_life)
+
+
+def _build_optimizer(net, cfg: PPOConfig) -> torch.optim.Optimizer:
+    """`cfg.lr` 이 실제로 옵티마이저에 닿는 자리 — 이 프로젝트에서 `gamma`/`lam` 이 `PPOConfig`
+
+    에는 있는데 실제로는 안 쓰여 조용히 무시된 적이 있다(`compute_gae` 호출부). `--lr` 을 줬는데
+    여기가 하드코딩된 값을 쓰면 같은 함정이 반복된다 — 그래서 이 자리를 별도 함수로 떼어
+    `opt.param_groups[0]["lr"]` 을 직접 테스트한다(`tests/rl/test_train_ppo.py`).
+    """
+    return torch.optim.Adam(net.parameters(), lr=cfg.lr)
+
+
+def main():
+    ap = _build_parser()
     a = ap.parse_args()
     if a.smoke:
         a.envs, a.steps, a.rollout = 2, 4000, 64
@@ -164,14 +204,17 @@ def main():
     torch.manual_seed(a.seed)
     stages = _stage_boards(a.curricula, a.smoke)
 
-    cfg = PPOConfig()
+    cfg = _build_cfg(a)
+    # 이번 실행에 쓴 하이퍼파라미터 — log.jsonl 각 줄과 요약 JSON 에 그대로 싣는다. 성적표가
+    # 여러 실행을 비교할 때 무엇이 달랐는지 산출물만 보고 알 수 있어야 한다(2026-09-21 지시).
+    hparams = vars(a)
     venv = None
     try:
         # venv 는 서브프로세스(비동기 벡터 환경)를 띄운다 — `--init` 오타 등으로 그 아래 어떤
         # 준비 코드가 죽어도 finally 가 반드시 타도록 venv 생성부터 이 try 안에 둔다.
         venv = make_vec_env(a.curricula, a.envs, EnvConfig(), seed=a.seed, asynchronous=not a.smoke)
         net = (ActorCritic.from_policy(a.init, device=dev) if a.init else ActorCritic()).to(dev)
-        opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
+        opt = _build_optimizer(net, cfg)
         buf = RolloutBuffer(a.rollout, a.envs, dev)
         gen = torch.Generator().manual_seed(a.seed)
         dagger_iter = (dagger_batches(load_dir(a.dagger_data), TrainConfig().batch_size,
@@ -237,7 +280,8 @@ def main():
                        **stats,
                        "explained_variance": ev_var if ev_var == ev_var else None,  # NaN → None(표준 JSON)
                        "log_std": net.policy.log_std.detach().cpu().tolist(),
-                       "stages": {label: _public(ev) for label, ev in evs.items()}}
+                       "stages": {label: _public(ev) for label, ev in evs.items()},
+                       "hparams": hparams}
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 net.save(os.path.join(a.out, f"ac-{step}.pt"))
@@ -273,7 +317,8 @@ def main():
     # 다른 뜻이라 요약 쪽은 이름을 갈랐다.
     summary = {"steps": step, "iters": updates, "seconds": time.perf_counter() - t0,
                "best_step": chosen_step,
-               "stages": {label: _public(ev) for label, ev in chosen_evs.items()}}
+               "stages": {label: _public(ev) for label, ev in chosen_evs.items()},
+               "hparams": hparams}
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 
