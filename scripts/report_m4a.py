@@ -1,12 +1,13 @@
-"""M4a 완료 증거 — PPO 학습 곡선 표 + M3/선생님 대비 표 + 목표 판정.
+"""M4a 완료 증거 — PPO 학습 곡선 표 + M3/선생님 대비 표 + 목표 판정 + 여러 실행 비교.
 
     env -u PYTHONPATH .venv/bin/python scripts/report_m4a.py \
-        --run runs/omen/2026-09-21-ppo --m3 runs/lab-main/2026-09-17-dagger-fix2/policy-r4.pt \
-        --out docs/reports/m4a-ppo.md --eval-seeds 3
+        --run runs/omen/2026-09-21-ppo --compare runs/omen/2026-09-22-ppo-entropy \
+        --m3 runs/lab-main/2026-09-17-dagger-fix2/policy-r4.pt \
+        --out docs/reports/m4a-ppo.md --eval-seeds 3 --notes docs/reports/m4a-ppo-notes.md
 
 `--skip-eval` 은 정책을 실제로 몰아 보는 절(비교 표·항목별 위반 표·목표 판정)을 건너뛰고
-`log.jsonl` 만으로 학습 곡선 표만 채운 뼈대를 만든다(짧은 스모크 실행을 빠르게 확인하는 용도,
-테스트가 이걸로 돈다).
+`log.jsonl` 만으로 학습 곡선 표·실행 비교 표만 채운 뼈대를 만든다(짧은 스모크 실행을 빠르게
+확인하는 용도, 테스트가 이걸로 돈다).
 
 M4a 학생 체크포인트(`ac-best.pt`)는 가치 머리가 붙은 `ActorCritic` 이라 `ActorCritic.load(path)`
 로 읽고 `.policy` 를 꺼낸다 — `DrivePolicy.load` 로는 못 읽는다(cfg 모양이 다르다). M3 체크포인트는
@@ -15,13 +16,22 @@ M4a 학생 체크포인트(`ac-best.pt`)는 가치 머리가 붙은 `ActorCritic
 평가는 단계(커리큘럼 파일)마다 따로 부른다 — `stage1.json`·`stage2.json` 은 판 이름을 그대로
 공유하고 `signals` 만 다르므로, 합쳐 넘기면 `VtdDriveEnv` 의 세계 캐시가 죽는다(`train_ppo.py` 의
 같은 주의사항 참고). 판은 `load_curriculum` 으로 단계별로 직접 읽는다.
+
+`--compare` 로 준 다른 실행들은 요약 비교 표(실행마다 한 행)와 그 실행 자신의 학습 곡선 표에만
+나온다 — M3/선생님 대비 표·항목별 위반 표·목표 네 줄 판정은 `--run`(이번에 채점하는 실행) 하나만
+싣는다(그게 "M4a 가 끝났는가"를 묻는 절이라 여러 실행을 합쳐 물을 수 없다).
 """
 import argparse
+import dataclasses
 import datetime
+import glob
 import json
 import os
 import platform
+import re
 import sys
+
+import torch
 
 REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, REPO)
@@ -30,6 +40,7 @@ from vtd_rl.policy import device as pick_device  # noqa: E402
 from vtd_rl.policy.evaluate import evaluate_policy, evaluate_teacher, violation_counts  # noqa: E402
 from vtd_rl.policy.net import DrivePolicy  # noqa: E402
 from vtd_rl.rl.actor_critic import ActorCritic  # noqa: E402
+from vtd_rl.rl.ppo import PPOConfig  # noqa: E402
 from vtd_rl.world.board import load_curriculum  # noqa: E402
 
 # 목표 문턱 — 계획 문서 자체는 "네 줄" 만 요구하고 숫자를 안 주므로, 이번 작업 지시가 확정한
@@ -39,6 +50,13 @@ SCORE_SLACK = 10.0
 ITEM2_MAJOR_MAX = 4      # 단계 ①, 항목②(보호구역 속도) 중대
 ITEM7_MAJOR_MAX = 19     # 단계 ②, 항목⑦(적색 정지) 중대
 STAGE1_LABEL, STAGE2_LABEL = "stage1", "stage2"
+
+# `train_ppo.py` 의 `hparams`(=`vars(argparse 결과)`) 에는 `--envs`·`--seed`·`--out` 처럼 실행마다
+# 자연히 다른 값도 섞여 있다. `--envs` 는 기본값 자체가 `os.cpu_count() - 2` 라 이 스크립트를 돌리는
+# 머신에서 다시 계산하면 실행 당시(OMEN)와 달라 보여 "바뀐 값"으로 잘못 잡힌다. 그래서 비교는
+# `PPOConfig` 필드와 이름이 같은, 실제로 CLI 로 연 네 하이퍼파라미터로만 좁힌다(train_ppo.py 의
+# `--entropy-coef`/`--lr`/`--target-kl`/`--imitation-half-life` 주석이 "이 네 개" 라 부르는 바로 그것).
+CLI_HPARAM_KEYS = ("lr", "entropy_coef", "target_kl", "imitation_half_life")
 
 
 def _circled(n: int) -> str:
@@ -61,6 +79,20 @@ def _distinct_episodes(ev: dict) -> int:
     return len({(e.board, e.outcome, e.steps) for e in ev["episodes"]})
 
 
+def _read_rows(run_dir: str) -> list:
+    """`<run_dir>/log.jsonl` 을 읽는다 — 없으면(학습이 아직 시작 전이거나 첫 평가 전이면) 빈 리스트.
+
+    `--compare` 로 진행 중인 실행을 넘길 수 있어서(2026-09-22 실측 — 두 번째 OMEN 실행이 도는 동안
+    성적표를 다시 만들어야 했다) 파일이 없는 것 자체는 에러가 아니다. `--run`(채점 대상)만 main() 에서
+    따로 필수로 확인한다.
+    """
+    log_path = os.path.join(run_dir, "log.jsonl")
+    if not os.path.exists(log_path):
+        return []
+    with open(log_path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
 def _curricula_from_log(rows: list) -> list:
     """`log.jsonl` 의 `stages` 키에서 커리큘럼 파일 경로를 되찾는다.
 
@@ -74,13 +106,62 @@ def _curricula_from_log(rows: list) -> list:
     return [(label, os.path.join(REPO, "curricula", f"{label}.json")) for label in rows[-1]["stages"]]
 
 
+def _hparam_diff(hparams) -> str:
+    """`CLI_HPARAM_KEYS` 만 `PPOConfig()` 기본값과 비교해 바뀐 것만 "key=value" 로 나열한다."""
+    if not hparams:
+        return "기록 안 됨(이 실행은 hparams 로깅 이전 버전으로 돌았다)"
+    defaults = dataclasses.asdict(PPOConfig())
+    diffs = [f"{k}={hparams[k]}" for k in CLI_HPARAM_KEYS if k in hparams and hparams[k] != defaults[k]]
+    return ", ".join(diffs) if diffs else "(기본값)"
+
+
+def _detect_best_step(run_dir: str):
+    """`ac-best.pt` 가 `ac-<step>.pt` 중 어느 것과 같은 체크포인트인지 state_dict 를 비교해 찾는다.
+
+    학습이 끝난 뒤 뽑은 `best_step` 은 표준출력에 찍는 요약 JSON 에만 있고 파일 어디에도 안 남는다
+    (`train_ppo.py` 의 `summary` 는 stdout 전용). 그 숫자를 손으로 옮겨 적지 않으려면 체크포인트
+    자체를 비교해 되찾아야 한다 — CPU 로만 읽는다(환경 시뮬레이션이 없어 device 를 안 가린다).
+    """
+    best_path = os.path.join(run_dir, "ac-best.pt")
+    if not os.path.exists(best_path):
+        return None
+    best_state = ActorCritic.load(best_path, device="cpu").state_dict()
+    for path in sorted(glob.glob(os.path.join(run_dir, "ac-*.pt"))):
+        m = re.fullmatch(r"ac-(\d+)\.pt", os.path.basename(path))
+        if not m:
+            continue
+        cand_state = ActorCritic.load(path, device="cpu").state_dict()
+        if set(cand_state) == set(best_state) and all(
+                torch.equal(cand_state[k], best_state[k]) for k in best_state):
+            return int(m.group(1))
+    return None
+
+
+def _best_step_caveat(rows: list, best_step) -> str:
+    """`best_step` 이 전체 스텝의 절반 미만이면, 그 시점의 모방 계수와 함께 사실을 그대로 적는다.
+
+    이건 해석이 아니라 사실이다 — 이게 없으면 완주율·점수 줄의 "달성"이 PPO 자체의 성과처럼
+    읽힌다(2026-09-22 지시: 507k/3M, 모방 계수 0.839 인 체크포인트가 뽑혔다).
+    """
+    if best_step is None or not rows:
+        return ""
+    total_steps = rows[-1]["step"]
+    if total_steps <= 0 or best_step >= total_steps / 2:
+        return ""
+    match = next((r for r in rows if r.get("step") == best_step), None)
+    coef = f"{match['imitation_coef']:.3f}" if match and "imitation_coef" in match else "알 수 없음"
+    pct = best_step / total_steps * 100
+    return (f"선정된 체크포인트가 {best_step} 스텝(전체 {total_steps} 의 {pct:.0f}%) 지점이고, 그때"
+            f" 모방 계수가 {coef} 였다 — 위 달성이 PPO 자체의 성과라기보다 M3 워밍스타트에 가까울"
+            " 수 있다는 뜻이다.")
+
+
 def _curve_table(rows: list, stage_labels: list) -> list:
     header = ["스텝", "iter"]
     for i, _label in enumerate(stage_labels, start=1):
         header += [f"단계{_circled(i)} 완주율", f"단계{_circled(i)} 점수(완주 0점 기준)"]
     header += ["explained_variance", "log_std", "모방 계수", "approx_kl"]
-    lines = ["", "### 학습 곡선(평가 시점마다 — 학습 중 주기 평가는 **시드 1개**)", "",
-             "| " + " | ".join(header) + " |", "|" + "|".join("---:" for _ in header) + "|"]
+    lines = ["", "| " + " | ".join(header) + " |", "|" + "|".join("---:" for _ in header) + "|"]
     for r in rows:
         cells = [str(r["step"]), str(r["iter"])]
         for label in stage_labels:
@@ -90,6 +171,46 @@ def _curve_table(rows: list, stage_labels: list) -> list:
         log_std = ", ".join(f"{x:.3f}" for x in r["log_std"])
         cells += [ev, log_std, f"{r['imitation_coef']:.3f}", f"{r['approx_kl']:.4f}"]
         lines.append("| " + " | ".join(cells) + " |")
+    return lines
+
+
+def _summary_table(run_dirs: list, rows_by_run: dict, best_steps: dict, extra_evs: dict,
+                   skip_eval: bool) -> list:
+    """실행마다 한 행 — 학습 중 주기 평가(시드 1개, log.jsonl)를 기본으로 쓰고, `extra_evs` 에
+
+    그 실행의 라이브 평가(`--skip-eval` 이 아닐 때만 채워진다)가 있으면 그 값으로 덮는다. 항목⑦·②
+    중대 건수는 구간-슬롯(sheet) 정보가 필요해 라이브 평가 없이는 절대 못 낸다 — 그때는 "—".
+    """
+    header = ["실행", "바뀐 하이퍼파라미터", "best_step", "단계① 완주율", "단계① 점수",
+              "단계② 완주율", "단계② 점수", "항목⑦ 중대", "항목② 중대", "log_std", "EV"]
+    lines = ["", "## 실행 비교", "", "| " + " | ".join(header) + " |",
+             "|" + "|".join("---" for _ in header) + "|"]
+    for rd in run_dirs:
+        rows = rows_by_run.get(rd, [])
+        name = os.path.basename(os.path.normpath(rd))
+        best_step = best_steps.get(rd)
+        last = rows[-1] if rows else None
+        hp = _hparam_diff(last.get("hparams")) if last else "로그 없음(학습 진행 중이거나 시작 전)"
+        stage_vals = dict(last["stages"]) if last else {}
+        item7 = item2 = "—"
+        live = extra_evs.get(rd)
+        if live:
+            stage_vals.update(live)
+            if STAGE2_LABEL in live:
+                item7 = violation_counts(live[STAGE2_LABEL]).get(7, {"major": 0})["major"]
+            if STAGE1_LABEL in live:
+                item2 = violation_counts(live[STAGE1_LABEL]).get(2, {"major": 0})["major"]
+        s1, s2 = stage_vals.get(STAGE1_LABEL), stage_vals.get(STAGE2_LABEL)
+        log_std = ", ".join(f"{x:.3f}" for x in last["log_std"]) if last else "—"
+        ev_val = (f"{last['explained_variance']:.3f}"
+                  if last and last.get("explained_variance") is not None else "—")
+        row = [name, hp, str(best_step) if best_step is not None else "미완료(ac-best.pt 없음)",
+               _fmt_pct(s1["goal_rate"]) if s1 else "—", _fmt_score(s1["mean_score"]) if s1 else "—",
+               _fmt_pct(s2["goal_rate"]) if s2 else "—", _fmt_score(s2["mean_score"]) if s2 else "—",
+               str(item7), str(item2), log_std, ev_val]
+        lines.append("| " + " | ".join(row) + " |")
+    if skip_eval:
+        lines += ["", "(`--skip-eval` 이라 항목⑦·② 열은 log.jsonl 만으로 못 채워 `—` 다.)"]
     return lines
 
 
@@ -136,7 +257,7 @@ def _violation_table_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teache
     return lines
 
 
-def _goal_lines(m4a_ev: dict, teacher_ev: dict) -> list:
+def _goal_lines(m4a_ev: dict, teacher_ev: dict, rows: list, best_step) -> list:
     """목표 네 줄(완주율·점수·항목⑦·항목②) — 이 절이 쓰는 유일한 평가는 마지막 전체 평가
 
     (시드 여러 개, `--eval-seeds`)다. 학습 곡선 표의 주기 평가(시드 1개)는 여기 안 쓴다.
@@ -156,26 +277,51 @@ def _goal_lines(m4a_ev: dict, teacher_ev: dict) -> list:
                 and s2["mean_score"] >= t2["mean_score"] - SCORE_SLACK)
     item2_ok = item2_major <= ITEM2_MAJOR_MAX
     item7_ok = item7_major <= ITEM7_MAJOR_MAX
+    achieved = sum([goal_ok, score_ok, item7_ok, item2_ok])
 
     def verdict(ok):
         return "달성" if ok else "미달"
 
-    return ["", "## 목표 판정", "",
-            f"- 목표: 완주율 — 단계①② 모두 ≥{_fmt_pct(GOAL_RATE_MIN)} → **{verdict(goal_ok)}** "
-            f"(실측: 단계① {_fmt_pct(s1['goal_rate'])}, 단계② {_fmt_pct(s2['goal_rate'])})",
-            f"- 목표: 점수 — 완주 못 한 판 0점 기준으로 선생님보다 {SCORE_SLACK:.0f}점 넘게 낮지"
-            f" 않을 것 → **{verdict(score_ok)}** (실측: 단계① {_fmt_score(s1['mean_score'])} vs 선생님"
-            f" {_fmt_score(t1['mean_score'])}, 단계② {_fmt_score(s2['mean_score'])} vs 선생님"
-            f" {_fmt_score(t2['mean_score'])})",
-            f"- 목표: 단계② 항목⑦({rs.score_fma.ITEMS[7]}) 중대 위반 ≤{ITEM7_MAJOR_MAX}건 → "
-            f"**{verdict(item7_ok)}** (실측 {item7_major}건)",
-            f"- 목표: 단계① 항목②({rs.score_fma.ITEMS[2]}) 중대 위반 ≤{ITEM2_MAJOR_MAX}건 → "
-            f"**{verdict(item2_ok)}** (실측 {item2_major}건)"]
+    lines = ["", "## 목표 판정", "", f"- 목표 4 줄 중 **{achieved} 줄 달성**.", "",
+             f"- 목표: 완주율 — 단계①② 모두 ≥{_fmt_pct(GOAL_RATE_MIN)} → **{verdict(goal_ok)}** "
+             f"(실측: 단계① {_fmt_pct(s1['goal_rate'])}, 단계② {_fmt_pct(s2['goal_rate'])})",
+             f"- 목표: 점수 — 완주 못 한 판 0점 기준으로 선생님보다 {SCORE_SLACK:.0f}점 넘게 낮지"
+             f" 않을 것 → **{verdict(score_ok)}** (실측: 단계① {_fmt_score(s1['mean_score'])} vs 선생님"
+             f" {_fmt_score(t1['mean_score'])}, 단계② {_fmt_score(s2['mean_score'])} vs 선생님"
+             f" {_fmt_score(t2['mean_score'])})"]
+    if goal_ok or score_ok:
+        caveat = _best_step_caveat(rows, best_step)
+        if caveat:
+            lines.append(f"  - ⚠️ {caveat}")
+    lines += [f"- 목표: 단계② 항목⑦({rs.score_fma.ITEMS[7]}) 중대 위반 ≤{ITEM7_MAJOR_MAX}건 → "
+              f"**{verdict(item7_ok)}** (실측 {item7_major}건)",
+              f"- 목표: 단계① 항목②({rs.score_fma.ITEMS[2]}) 중대 위반 ≤{ITEM2_MAJOR_MAX}건 → "
+              f"**{verdict(item2_ok)}** (실측 {item2_major}건)"]
+    return lines
+
+
+def _notes_lines(notes_path) -> list:
+    """"관찰과 해석" 절 — 표의 숫자는 전부 이 스크립트가 생성하지만, 무엇이 일어났고 왜인지에
+
+    대한 해석은 생성할 수 없다(2026-09-22 지시). `--notes` 파일 내용을 그대로 삽입만 한다 —
+    검증도 가공도 안 한다. 안 주면 정확히 이 한 줄만 남긴다(자리표시자를 알아서 지어내지 않는다).
+    """
+    lines = ["", "## 관찰과 해석", ""]
+    if not notes_path:
+        return lines + ["관찰과 해석 — `--notes` 로 주지 않았다"]
+    with open(notes_path, encoding="utf-8") as f:
+        content = f.read().rstrip("\n")
+    return lines + [content]
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True, help="train_ppo.py 가 남긴 실행 폴더(log.jsonl, ac-best.pt)")
+    ap.add_argument("--compare", action="append", default=[],
+                    help="비교할 다른 실행 폴더(반복 가능) — 요약 비교 표와 자기 학습 곡선 표에만 나온다"
+                        "(M3/선생님 대비·항목별 위반·목표 판정은 --run 하나만 싣는다)")
+    ap.add_argument("--notes", default=None,
+                    help="'관찰과 해석' 절에 그대로 삽입할 마크다운 파일(가공 없이 그대로 붙인다)")
     ap.add_argument("--m3", default=None, help="비교할 M3 DrivePolicy 체크포인트(policy-rN.pt)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--eval-seeds", type=int, default=3,
@@ -186,28 +332,68 @@ def main():
                     help="train_ppo.py 실행 때 준 --seed 값 — log.jsonl 에 안 남으므로 알고 있으면"
                         " 직접 넘긴다(성적표에 그대로 적는다, 없으면 '기록 안 됨')")
     ap.add_argument("--skip-eval", action="store_true",
-                    help="정책을 실제로 몰아 보는 비교·위반·목표 판정을 건너뛰고 학습 곡선 표만 만든다"
-                        "(테스트·빠른 확인용)")
+                    help="정책을 실제로 몰아 보는 비교·위반·목표 판정을 건너뛰고 학습 곡선·실행 비교"
+                        " 표만 만든다(테스트·빠른 확인용)")
     a = ap.parse_args()
     if not a.skip_eval and not a.m3:
         ap.error("--skip-eval 이 아니면 --m3(비교할 M3 체크포인트)가 필요하다")
 
-    log_path = os.path.join(a.run, "log.jsonl")
-    if not os.path.exists(log_path):
-        ap.error(f"{log_path} 가 없다")
-    with open(log_path, encoding="utf-8") as f:
-        rows = [json.loads(line) for line in f if line.strip()]
-    if not rows:
-        ap.error(f"{log_path} 에 평가 기록이 없다")
-    last = rows[-1]
+    primary_rows = _read_rows(a.run)
+    if not primary_rows:
+        ap.error(f"{os.path.join(a.run, 'log.jsonl')} 가 없거나 비어 있다")
+    last = primary_rows[-1]
     stage_labels = list(last["stages"])
-    curricula = _curricula_from_log(rows)
+    curricula = _curricula_from_log(primary_rows)
+
+    run_dirs = [a.run] + list(a.compare)
+    rows_by_run = {rd: (primary_rows if rd == a.run else _read_rows(rd)) for rd in run_dirs}
+    best_steps = {rd: _detect_best_step(rd) for rd in run_dirs}
+
+    # 라이브 평가(비교 표·항목별 위반·목표 판정·실행 비교 표의 항목⑦·② 열이 쓴다) — `--run` 은
+    # 한 번만 평가해 두 곳(깊은 비교 절 + 실행 비교 표)에 그대로 재사용한다(중복 평가로 몇 분씩
+    # 낭비하지 않는다). `--compare` 실행은 체크포인트가 있을 때만(학습이 끝났을 때만) 평가한다.
+    m4a_ev = m3_ev = teacher_ev = None
+    extra_evs = {}
+    dev = None
+    if not a.skip_eval:
+        dev = pick_device(a.device)
+        eval_seeds = tuple(range(a.eval_seeds))
+        stage_paths = dict(curricula)
+        for label in stage_labels:
+            if not os.path.exists(stage_paths[label]):
+                ap.error(f"커리큘럼 파일을 못 찾았다: {stage_paths[label]}(라벨 '{label}')")
+        boards_by_stage = {label: load_curriculum(stage_paths[label])[1] for label in stage_labels}
+
+        ac = ActorCritic.load(os.path.join(a.run, "ac-best.pt"), device=dev)
+        ac.eval()
+        m3_policy = DrivePolicy.load(a.m3, device=dev)
+
+        m4a_ev = {label: evaluate_policy(ac.policy, boards_by_stage[label], seeds=eval_seeds)
+                  for label in stage_labels}
+        m3_ev = {label: evaluate_policy(m3_policy, boards_by_stage[label], seeds=eval_seeds)
+                 for label in stage_labels}
+        teacher_ev = {label: evaluate_teacher(boards_by_stage[label], seeds=eval_seeds)
+                      for label in stage_labels}
+        extra_evs[a.run] = m4a_ev
+
+        for rd in a.compare:
+            rows = rows_by_run[rd]
+            if not rows or best_steps.get(rd) is None:
+                continue   # 학습이 아직 안 끝났다(ac-best.pt 없음) — 요약 표에서 "미완료" 로 남는다
+            cand = ActorCritic.load(os.path.join(rd, "ac-best.pt"), device=dev)
+            cand.eval()
+            evs = {}
+            for label, path in _curricula_from_log(rows):
+                if os.path.exists(path):
+                    _n, boards = load_curriculum(path)
+                    evs[label] = evaluate_policy(cand.policy, boards, seeds=eval_seeds)
+            extra_evs[rd] = evs
 
     lines = ["# M4a 성적표 — PPO", "",
              f"- 날짜 {datetime.date.today().isoformat()} · 성적표 생성 머신 `{platform.node()}` · "
              f"규칙 스택 `{rs.commit()[:7]}`",
-             f"- 학습 실행 `{a.run}`(어느 머신에서 돌렸는지는 이 경로로 안다, 예: `runs/omen/...`) · "
-             f"총 스텝 {last['step']} · 걸린 시간(마지막 로그 시점 기준) {last['elapsed_s']:.0f}초 · "
+             f"- 채점 대상 실행 `{a.run}`(어느 머신에서 돌렸는지는 이 경로로 안다, 예: `runs/omen/...`)"
+             f" · 총 스텝 {last['step']} · 걸린 시간(마지막 로그 시점 기준) {last['elapsed_s']:.0f}초 · "
              f"반복(iter) {last['iter']}회",
              "- 학습 시드: " + (f"{a.train_seed}(직접 입력값 — log.jsonl 에는 학습 시드가 안 남는다)"
                               if a.train_seed is not None
@@ -219,50 +405,44 @@ def main():
              f"아래 목표 판정에 쓰는 수치는 그와 별개로 이 성적표 생성 스크립트가 시드 **{a.eval_seeds}개**"
              "로 다시 돌린 마지막 전체 평가다."]
 
-    lines += _curve_table(rows, stage_labels)
+    # 학습 곡선 표 — 실행마다(비교 대상 포함) 나란히
+    for rd in run_dirs:
+        rows = rows_by_run[rd]
+        name = os.path.basename(os.path.normpath(rd))
+        lines += ["", f"### 학습 곡선 — 실행 `{name}`(`{rd}`)"]
+        if not rows:
+            lines += ["", "로그가 없다(학습이 아직 시작 전이거나 첫 평가 전이다)."]
+            continue
+        lines += _curve_table(rows, list(rows[-1]["stages"]))
+
+    lines += _summary_table(run_dirs, rows_by_run, best_steps, extra_evs, a.skip_eval)
 
     if a.skip_eval:
         lines += ["", "## 목표 판정", "",
                   "`--skip-eval` 로 만들어 정책을 실제로 몰아 보지 않았다 — 완주율·점수·항목별 위반"
-                  " 목표 판정은 보류다(학습 곡선 표만 유효하다).",
+                  " 목표 판정은 보류다(학습 곡선 표·실행 비교 표만 유효하다).",
                   "", "### 항목별 위반 — 평가 생략", "", "`--skip-eval` 이라 위반 집계가 없다."]
     else:
-        dev = pick_device(a.device)
-        eval_seeds = tuple(range(a.eval_seeds))
-        stage_paths = dict(curricula)
-        for label in stage_labels:
-            if not os.path.exists(stage_paths[label]):
-                ap.error(f"커리큘럼 파일을 못 찾았다: {stage_paths[label]}(라벨 '{label}')")
-        boards_by_stage = {label: load_curriculum(stage_paths[label])[1] for label in stage_labels}
-
-        ac = ActorCritic.load(os.path.join(a.run, "ac-best.pt"), device=dev)
-        ac.eval()
-        m4a_policy = ac.policy
-        m3_policy = DrivePolicy.load(a.m3, device=dev)
-
-        m4a_ev = {label: evaluate_policy(m4a_policy, boards_by_stage[label], seeds=eval_seeds)
-                  for label in stage_labels}
-        m3_ev = {label: evaluate_policy(m3_policy, boards_by_stage[label], seeds=eval_seeds)
-                 for label in stage_labels}
-        teacher_ev = {label: evaluate_teacher(boards_by_stage[label], seeds=eval_seeds)
-                      for label in stage_labels}
-
         lines += _comparison_lines(stage_labels, m3_ev, m4a_ev, teacher_ev, a.eval_seeds)
         lines += _violation_table_lines(stage_labels, m3_ev, m4a_ev, teacher_ev)
-        lines += _goal_lines(m4a_ev, teacher_ev)
+        lines += _goal_lines(m4a_ev, teacher_ev, primary_rows, best_steps[a.run])
+
+    lines += _notes_lines(a.notes)
 
     lines += ["", "## M4b 로 미루는 것", "",
               "- 커리큘럼 단계 ③④⑤(사물·정지차 / 보행자·교통 / 연습코스 전체)와 자동 진급 — 액터가"
               " 있는 판을 만들어야 한다(M2a 의 시나리오 도구를 쓴다).",
               "- 두 머신 운용의 나머지(두 머신에서 동시에 다른 설정을 돌리고 결과를 모으기, `nice` 규칙).",
-              "- 스텝 예산 계획과 하이퍼파라미터 탐색(엔트로피 계수·클립·롤아웃 길이).",
+              "- 스텝 예산 계획과 하이퍼파라미터 탐색(엔트로피 계수·클립·롤아웃 길이) — 이 성적표의"
+              " 실행 비교 표가 그 탐색의 첫 결과다.",
               "- 같은 시드에서 같은 학습 곡선이 나오는지(학습 반복 재현성) 확인.",
               "", "산출물(로그·체크포인트)은 `runs/` 아래에 있고 레포에는 넣지 않는다."]
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-    print(json.dumps({"report": a.out, "rows": len(rows), "skip_eval": a.skip_eval}, ensure_ascii=False))
+    print(json.dumps({"report": a.out, "rows": len(primary_rows), "skip_eval": a.skip_eval,
+                      "runs": run_dirs}, ensure_ascii=False))
     return 0
 
 
