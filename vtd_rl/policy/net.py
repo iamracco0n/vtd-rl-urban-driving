@@ -22,6 +22,7 @@ class PolicyConfig:
     trunk: tuple = (256, 256)
     log_std_init: float = -1.0
     log_std_min: float = -2.0       # 조향 표준편차가 무너져 가속 머리를 굶기지 않도록(σ≥0.135, ~8배 차이로 제한)
+    log_std_max: float = 0.5        # 탐색 폭이 무한정 커지지 않도록
 
 
 class DrivePolicy(nn.Module):
@@ -50,22 +51,56 @@ class DrivePolicy(nn.Module):
         pooled = torch.where(mask.sum(dim=1, keepdim=True) > 0.0, pooled,
                              torch.zeros_like(pooled))        # 물체가 없으면 0
         z = self.trunk(torch.cat([vec, pooled], dim=-1))
-        log_std = self.log_std.clamp(min=self.cfg.log_std_min)
+        # 범위는 자르지 않는다 — 자르면 바닥·천장에서 기울기가 0 이 되어 탐색 폭이
+        # 영원히 고정된다. 범위는 아래 clamp_log_std() 가 최적화 한 걸음 뒤에 지킨다.
+        log_std = self.log_std
         return self.mean(z), log_std, self.turn(z)
+
+    @torch.no_grad()
+    def clamp_log_std(self):
+        """최적화 한 걸음 뒤에 부른다 — 범위는 지키되 기울기는 살려 둔다."""
+        self.log_std.clamp_(self.cfg.log_std_min, self.cfg.log_std_max)
+
+    def _dists(self, vec, objs, mask):
+        mean, log_std, logits = self(vec, objs, mask)
+        normal = torch.distributions.Normal(mean, log_std.exp())
+        cat = torch.distributions.Categorical(logits=logits)
+        return normal, cat
+
+    def sample(self, vec, objs, mask, generator=None) -> dict:
+        """PPO 용 표본 — **자르기 전** 원표본과 그 로그확률을 함께 준다.
+
+        환경에는 자른 값을 넣지만, 로그확률·비율은 원표본으로 계산해야 분포가 일관된다.
+        """
+        normal, cat = self._dists(vec, objs, mask)
+        noise = torch.randn(normal.mean.shape, generator=generator).to(normal.mean.device)
+        raw = normal.mean + noise * normal.stddev
+        turn = torch.multinomial(cat.probs.cpu(), 1, generator=generator).squeeze(-1).to(raw.device)
+        log_prob = normal.log_prob(raw).sum(dim=-1) + cat.log_prob(turn)
+        entropy = normal.entropy().sum(dim=-1) + cat.entropy()
+        return {"raw": raw, "control": raw.clamp(-1.0, 1.0), "turn": turn,
+                "log_prob": log_prob, "entropy": entropy, "value": None}
+
+    def evaluate_actions(self, vec, objs, mask, raw, turn):
+        """저장해 둔 원표본에 대한 현재 정책의 로그확률(PPO 비율 계산용)."""
+        normal, cat = self._dists(vec, objs, mask)
+        log_prob = normal.log_prob(raw).sum(dim=-1) + cat.log_prob(turn)
+        entropy = normal.entropy().sum(dim=-1) + cat.entropy()
+        return log_prob, entropy
 
     @torch.no_grad()
     def act(self, obs: dict, deterministic: bool = True, generator=None) -> dict:
         vec, objs, mask = to_tensors(*flatten_obs(obs), self.device)
-        mean, log_std, logits = self(vec, objs, mask)
         if deterministic:
+            mean, _log_std, logits = self(vec, objs, mask)
             control = mean[0]
             turn = int(torch.argmax(logits[0]).item())
         else:
-            # 표본 추출은 CPU 에서 한다 — CPU 생성기를 CUDA 텐서에 쓰면 오류가 난다
-            noise = torch.randn(mean.shape, generator=generator).to(mean.device)
-            control = mean[0] + noise[0] * log_std.exp()
-            probs = torch.softmax(logits[0], dim=-1).cpu()
-            turn = int(torch.multinomial(probs, 1, generator=generator).item())
+            # 표본 추출은 sample() 을 그대로 쓴다 — 내부에서 CPU 생성기를 CUDA 텐서에
+            # 바로 쓰지 않도록 처리한다
+            out = self.sample(vec, objs, mask, generator=generator)
+            control = out["control"][0]
+            turn = int(out["turn"][0].item())
         control = control.clamp(-1.0, 1.0).cpu().numpy().astype(np.float32)
         return {"control": control, "turn": turn}
 

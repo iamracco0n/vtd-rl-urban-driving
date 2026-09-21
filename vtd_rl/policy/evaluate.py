@@ -21,8 +21,11 @@ class EpisodeOutcome:
 
 def _summary(episodes) -> dict:
     n = max(len(episodes), 1)
+    # 완주하지 못한 판은 0점으로 친다 — 멈춰 선 차는 위반을 안 해 점수가 오히려 높다(M3 관찰).
+    scored = [e.score if e.outcome == "goal" else 0.0 for e in episodes]
     return {"goal_rate": sum(1 for e in episodes if e.outcome == "goal") / n,
-            "mean_score": sum(e.score for e in episodes) / n,
+            "mean_score": sum(scored) / n,
+            "mean_score_raw": sum(e.score for e in episodes) / n,
             "mean_reward": sum(e.reward for e in episodes) / n,
             "episodes": episodes}
 
