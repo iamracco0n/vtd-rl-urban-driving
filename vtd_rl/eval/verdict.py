@@ -8,11 +8,32 @@ M4a 는 판정이 성적표에만 있었고, 목표를 **항목 두 개**(⑦ �
 그래서 스펙 §6.4 의 원래 문구(완주율과 **총점**)로 되돌리고, M4a 가 묻지 않았던 두 가지를
 더한다 — **출발점(M3 학생)보다 나은가**, 그리고 **중대 위반 총합이 늘지 않았는가**.
 항목별 건수는 진단으로만 본다.
+
+Task 1 첫 리뷰에서 두 가지가 더 드러났다.
+
+1. `mean_score` 는 미완주 판을 0 점으로 치므로 항상 `mean_score <= 100 * goal_rate` 다.
+   그래서 여유폭 없이 "3번(출발점 대비 점수) 이 M3 보다 크면" 만 걸면, 완주율(1번)과
+   선생님 대비 점수(2번)는 3번이 참일 때 **저절로** 참이 된다 — 실제로 깨질 수 있는 줄은
+   3·4번뿐인데 "4줄 중 2줄 달성" 처럼 부풀려 보인다. 그래서 1·2번은
+   `GoalVerdict.precondition=True` 로 표시해 3번에 이미 포함된 전제일 뿐 독립 목표가
+   아님을 드러낸다. 또한 평가판이 고정된 같은 18판이고 M4a 는 결과를 본 뒤 가장 잘 맞춘
+   실행을 골랐으므로, 여유폭이 0이면 "여러 번 돌려 운 좋게 넘긴 값" 도 통과한다 —
+   `M3_SCORE_MARGIN` 으로 막는다.
+2. 미완주 판은 도달하지 못한 구간의 위반이 채점표에 아예 없어 중대 위반이 실제보다 적게
+   잡힌다. 점수는 미완주를 0점으로 **벌하는데** 위반 집계는 반대로 **상**을 주는 셈이다.
+   그래서 중대 위반은 완주한 판만(`completed_only`) 골라 센 뒤 합산한다.
 """
 from dataclasses import dataclass
 
 GOAL_RATE_MIN = 0.9
 TEACHER_SCORE_SLACK = 10.0
+
+# mean_score 는 미완주 판을 0점으로 치므로 항상 mean_score <= 100 * goal_rate 다. 여유폭 없이
+# "M3 보다 크면" 만 걸면 3번이 참인 순간 1·2번도 저절로 참이 돼(위 모듈 docstring 참고),
+# 게다가 그 문턱을 ε 만 넘겨도(운 좋게 한 번 잘 나온 값도) 통과해 버린다. 단계② 중대 위반
+# 슬롯 7~8개에 해당하는 크기(0.5점)를 여유로 둔다 — 슬롯 하나(≈0.067점)와는 확실히 구분되는
+# 크기다.
+M3_SCORE_MARGIN = 0.5
 
 # 2026-09-21 실측(시드 3개, `runs/lab-main/2026-09-17-dagger-fix2/policy-r4.pt`).
 # 단계① 중대: 항목② 15. 단계② 중대: 항목② 15 + 항목⑦ 64 = 79.
@@ -28,6 +49,10 @@ class GoalVerdict:
     name: str
     ok: bool
     line: str
+    # True 면 이 줄은 3번(출발점 대비 점수)에 이미 포함된 전제 조건일 뿐 독립 목표가
+    # 아니다(위 모듈 docstring 1번). 헤드라인 "N줄 중 M줄 달성" 은 이 플래그가 False 인
+    # 줄만 세야 한다.
+    precondition: bool = False
 
 
 def major_total(counts: dict) -> int:
@@ -35,43 +60,81 @@ def major_total(counts: dict) -> int:
     return sum(v.get("major", 0) for v in counts.values())
 
 
+def completed_only(ev: dict) -> dict:
+    """완주한 판만 남긴 같은 모양의 dict.
+
+    미완주 판은 도달하지 못한 구간의 슬롯이 채점표에 아예 없어 위반이 실제보다 적게 잡힌다.
+    `major_total(violation_counts(ev))` 앞에 이걸 끼워 완주한 판만 세게 한다.
+    """
+    return {**ev, "episodes": [e for e in ev["episodes"] if e.outcome == "goal"]}
+
+
 def _pct(x: float) -> str:
     return f"{x * 100:.0f}%"
 
 
-def judge(student: dict, teacher: dict, major_totals: dict, eval_seeds: int) -> list:
+def _label(ok: bool, held: bool) -> str:
+    """보류일 때는 "미달" 이라고 쓰지 않는다 — 판정 자체가 유보된 것이지 실패가 아니다."""
+    if held:
+        return "보류"
+    return "달성" if ok else "미달"
+
+
+def _completion_note(ev: dict):
+    """`ev["episodes"]` 에서 완주 수/전체 수 "N/M" 문자열을 낸다. 정보가 없으면 None."""
+    episodes = ev.get("episodes")
+    if not episodes:
+        return None
+    completed = sum(1 for e in episodes if e.outcome == "goal")
+    return f"{completed}/{len(episodes)}"
+
+
+def judge(student: dict, teacher: dict, major_totals: dict, eval_seeds: int) -> list[GoalVerdict]:
+    missing = [stage for stage in ("stage1", "stage2") if stage not in student]
+    if missing:
+        raise ValueError(f"student 평가 결과에 {', '.join(missing)} 가 없다 — "
+                          "두 단계를 모두 평가해야 판정할 수 있다")
+
     s1, s2 = student["stage1"], student["stage2"]
     t1, t2 = teacher["stage1"], teacher["stage2"]
     held = eval_seeds != REQUIRED_EVAL_SEEDS
-    hold = (f" — **보류**(M3 기준값이 시드 {REQUIRED_EVAL_SEEDS}개 합계인데 이번 평가는"
+    hold = (f" (M3 기준값이 시드 {REQUIRED_EVAL_SEEDS}개 합계인데 이번 평가는"
             f" 시드 {eval_seeds}개다. 같은 시드 수로 다시 재야 비교가 성립한다)")
 
     goal_ok = s1["goal_rate"] >= GOAL_RATE_MIN and s2["goal_rate"] >= GOAL_RATE_MIN
     score_ok = (s1["mean_score"] >= t1["mean_score"] - TEACHER_SCORE_SLACK
                 and s2["mean_score"] >= t2["mean_score"] - TEACHER_SCORE_SLACK)
-    beats_m3 = (s1["mean_score"] > M3_SCORE["stage1"] and s2["mean_score"] > M3_SCORE["stage2"])
+    beats_m3 = (s1["mean_score"] > M3_SCORE["stage1"] + M3_SCORE_MARGIN
+                and s2["mean_score"] > M3_SCORE["stage2"] + M3_SCORE_MARGIN)
     majors_ok = (major_totals["stage1"] <= M3_MAJOR_TOTAL["stage1"]
                  and major_totals["stage2"] <= M3_MAJOR_TOTAL["stage2"])
+
+    n1, n2 = _completion_note(s1), _completion_note(s2)
+    completion_suffix = (f" (완주 판 기준 — 단계① {n1}, 단계② {n2})"
+                         if n1 is not None and n2 is not None else "")
 
     return [
         GoalVerdict("완주율", goal_ok,
                     f"완주율 단계①② 모두 ≥{_pct(GOAL_RATE_MIN)} → **{'달성' if goal_ok else '미달'}**"
-                    f" (실측: 단계① {_pct(s1['goal_rate'])}, 단계② {_pct(s2['goal_rate'])})"),
+                    f" (실측: 단계① {_pct(s1['goal_rate'])}, 단계② {_pct(s2['goal_rate'])})",
+                    precondition=True),
         GoalVerdict("선생님 대비 점수", score_ok,
                     f"점수가 선생님보다 {TEACHER_SCORE_SLACK:.0f}점 넘게 낮지 않을 것 →"
                     f" **{'달성' if score_ok else '미달'}** (실측: 단계① {s1['mean_score']:.1f} vs"
                     f" 선생님 {t1['mean_score']:.1f}, 단계② {s2['mean_score']:.1f} vs"
-                    f" 선생님 {t2['mean_score']:.1f})"),
+                    f" 선생님 {t2['mean_score']:.1f})",
+                    precondition=True),
         GoalVerdict("출발점 대비 점수", beats_m3 and not held,
-                    f"점수가 출발점(M3 학생)보다 나을 것 →"
-                    f" **{'달성' if beats_m3 and not held else '미달'}** (실측: 단계①"
+                    f"점수가 출발점(M3 학생)보다 {M3_SCORE_MARGIN:.1f}점 넘게 나을 것 →"
+                    f" **{_label(beats_m3, held)}** (실측: 단계①"
                     f" {s1['mean_score']:.1f} vs M3 {M3_SCORE['stage1']:.1f}, 단계②"
                     f" {s2['mean_score']:.1f} vs M3 {M3_SCORE['stage2']:.1f})"
                     + (hold if held else "")),
         GoalVerdict("전 항목 중대 위반", majors_ok and not held,
                     f"중대 위반 **합계**가 M3 학생보다 늘지 않을 것 →"
-                    f" **{'달성' if majors_ok and not held else '미달'}** (실측: 단계①"
+                    f" **{_label(majors_ok, held)}** (실측: 단계①"
                     f" {major_totals['stage1']} vs M3 {M3_MAJOR_TOTAL['stage1']}, 단계②"
                     f" {major_totals['stage2']} vs M3 {M3_MAJOR_TOTAL['stage2']})"
+                    + completion_suffix
                     + (hold if held else "")),
     ]
