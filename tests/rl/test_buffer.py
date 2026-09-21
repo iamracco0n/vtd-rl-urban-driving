@@ -56,3 +56,14 @@ def test_이점은_표준화된다():
     buf.compute_gae(last_value=torch.zeros(2))
     adv = torch.cat([b[6] for b in buf.batches(100, generator=torch.Generator().manual_seed(0))])
     assert abs(float(adv.mean())) < 1e-5 and abs(float(adv.std()) - 1.0) < 1e-3
+
+
+def test_마지막_부트스트랩_가치의_기울기는_발생원에서_끊긴다():
+    # Task 6 이 torch.no_grad() 없이 마지막 가치를 넘겨도(부주의) compute_gae 가 스스로 막아야 한다 —
+    # 안 그러면 ratio * adv 가 이점을 미분해 가치망에 가짜 기울기를 흘린다.
+    buf = RolloutBuffer(2, 1, torch.device("cpu"))
+    fill(buf, rewards=[1.0, 1.0], dones=[0.0, 0.0], values=[0.0, 0.0])
+    last_value = torch.zeros(1, requires_grad=True)
+    buf.compute_gae(last_value=last_value)
+    assert not buf.advantages_raw.requires_grad
+    assert not buf.returns.requires_grad

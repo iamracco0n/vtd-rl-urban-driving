@@ -1,10 +1,12 @@
+import math
+
+import numpy as np
 import torch
 
 from vtd_rl.policy.dataset import DaggerDataset, Shard
 from vtd_rl.policy.encode import OBJ_DIM, OBJ_N, VEC_DIM
 from vtd_rl.rl.buffer import RolloutBuffer
 from vtd_rl.rl.ppo import PPOConfig, dagger_batches, imitation_coef, ppo_losses, update
-import numpy as np
 
 
 def filled_buffer(net, n_steps=4, n_envs=2):
@@ -33,6 +35,29 @@ def toy_dagger(n=64):
     return ds
 
 
+class _StubNet:
+    """검증용 가짜 net — `log_prob`·`entropy`·`value` 를 마음대로 통제해 손실 공식만 본다."""
+
+    def __init__(self, log_prob=None, entropy=None, value=None, n=1):
+        self.log_prob = log_prob if log_prob is not None else torch.zeros(n)
+        self.entropy = entropy if entropy is not None else torch.zeros(n)
+        self.value = value if value is not None else torch.zeros(n)
+
+    def evaluate_actions(self, vec, objs, mask, raw, turn):
+        return self.log_prob, self.entropy, self.value
+
+
+def _zero_batch(n, old_log_prob=None, adv=None, ret=None, old_value=None):
+    """`ppo_losses` 가 `vec/objs/mask/raw`(모양만 필요) 를 무시하는 `_StubNet` 과 쓸 더미 배치."""
+    z = torch.zeros(n, 1)
+    turn = torch.zeros(n, dtype=torch.long)
+    return (z, z, z, z, turn,
+            old_log_prob if old_log_prob is not None else torch.zeros(n),
+            adv if adv is not None else torch.zeros(n),
+            ret if ret is not None else torch.zeros(n),
+            old_value if old_value is not None else torch.zeros(n))
+
+
 def test_처음_업데이트에서는_비율이_1이라_잘림이_없다(small_ac):
     net = small_ac()
     buf = filled_buffer(net)
@@ -47,6 +72,18 @@ def test_모방_배치는_끝없이_돈다():
     assert sum(1 for _ in zip(range(10), it)) == 10   # 두 배치짜리를 열 번 꺼내도 안 끊긴다
 
 
+def test_모방_배치는_빈_데이터셋을_거부한다():
+    empty = DaggerDataset()
+    empty.add(Shard(np.zeros((0, VEC_DIM), np.float32), np.zeros((0, OBJ_N, OBJ_DIM), np.float32),
+                     np.zeros((0, OBJ_N), np.float32), np.zeros((0, 2), np.float32),
+                     np.zeros((0,), np.int64), {}))
+    try:
+        next(dagger_batches(empty, 4))
+        assert False, "행이 없는 데이터셋은 즉시 거부해야 한다(안 그러면 while True 가 영원히 빈다)"
+    except ValueError:
+        pass
+
+
 def test_모방_계수는_반감기로_준다():
     cfg = PPOConfig(imitation_coef0=1.0, imitation_half_life=100)
     assert imitation_coef(0, cfg) == 1.0
@@ -54,10 +91,66 @@ def test_모방_계수는_반감기로_준다():
     assert abs(imitation_coef(200, cfg) - 0.25) < 1e-9
 
 
+def test_정책_손실의_부호와_클리핑():
+    """A=±1, r∈{0.7,1.3} 네 조합에서 dL/d(log_prob) 부호를 확인한다.
+
+    비율이 클리핑 경계 밖으로 나가면서 '이미 충분히 움직인' 방향이면 기울기가 정확히 0 이어야
+    한다 — 그게 PPO 가 막으려는 바로 그 두 칸이다(부호 반전·비율 역수·클리핑 제거·min↔max
+    교체를 전부 잡아낸다).
+    """
+    cases = [(0.7, 1.0, -0.700), (0.7, -1.0, 0.0), (1.3, 1.0, 0.0), (1.3, -1.0, 1.300)]
+    for r, adv_val, expected in cases:
+        log_prob = torch.zeros(1, requires_grad=True)
+        old_log_prob = torch.tensor([-math.log(r)])
+        net = _StubNet(log_prob=log_prob)
+        batch = _zero_batch(1, old_log_prob=old_log_prob, adv=torch.tensor([adv_val]))
+        loss, _ = ppo_losses(net, batch, PPOConfig(value_coef=0.0, entropy_coef=0.0))
+        loss.backward()
+        assert abs(log_prob.grad.item() - expected) < 1e-3, (r, adv_val, log_prob.grad.item())
+
+
+def test_가치_클리핑이_폭_밖에서_기울기를_막는다():
+    cfg = PPOConfig(value_clip=0.2)
+
+    def grad_at(value_val):
+        value = torch.tensor([value_val], requires_grad=True)
+        net = _StubNet(value=value)
+        batch = _zero_batch(1, ret=torch.tensor([10.0]), old_value=torch.zeros(1))
+        loss, _ = ppo_losses(net, batch, cfg)
+        loss.backward()
+        return value.grad.item()
+
+    assert abs(grad_at(0.1)) > 1e-3        # 클리핑 폭(±0.2) 안 — 기울기가 살아 있다
+    assert abs(grad_at(1.0)) < 1e-9        # 클리핑 폭 밖 — 기울기가 완전히 막힌다
+
+
+def test_엔트로피_계수가_기울기_크기를_그대로_정한다():
+    for coef in (0.0, 0.005, 0.5):
+        for entropy_val in (3.0, -5.0):    # 엔트로피 값 자체와는 무관해야 한다
+            entropy = torch.tensor([entropy_val], requires_grad=True)
+            net = _StubNet(entropy=entropy)
+            batch = _zero_batch(1)
+            loss, _ = ppo_losses(net, batch, PPOConfig(entropy_coef=coef, value_coef=0.0))
+            loss.backward()
+            assert abs(entropy.grad.item() - (-coef)) < 1e-9
+
+
+def test_approx_kl은_음수가_아니다():
+    for logratio in torch.linspace(-2.0, 2.0, 21):
+        old_log_prob = torch.tensor([-logratio.item()])
+        net = _StubNet()   # log_prob 는 기본값 0 — old_log_prob 와의 차가 logratio
+        batch = _zero_batch(1, old_log_prob=old_log_prob)
+        _, parts = ppo_losses(net, batch, PPOConfig())
+        assert parts["approx_kl"] >= -1e-9, (float(logratio), parts["approx_kl"])
+
+
 def test_업데이트가_돌고_범위를_지킨다(small_ac):
     net = small_ac()
     with torch.no_grad():
-        net.policy.log_std.copy_(torch.tensor([-1.9, 0.45]))
+        # 경계 밖(하한 -2.0 · 상한 0.5 보다 각각 0.5·0.4 벗어난 값)에서 시작한다 — 몇 걸음의
+        # 작은 Adam 이동(~1e-3 대)으로는 절대 저절로 범위 안에 못 들어온다. clamp_log_std() 를
+        # 지우면 이 단언은 반드시 깨져야 한다(아래 GREEN/RED 증거 참고).
+        net.policy.log_std.copy_(torch.tensor([-2.5, 0.9]))
     buf = filled_buffer(net, n_steps=8, n_envs=4)
     opt = torch.optim.Adam(net.parameters(), lr=1e-3)
     it = dagger_batches(toy_dagger(), 32, generator=torch.Generator().manual_seed(0))
@@ -66,6 +159,28 @@ def test_업데이트가_돌고_범위를_지킨다(small_ac):
     assert set(out) >= {"policy", "value", "entropy", "approx_kl", "clip_frac", "imitation"}
     lo, hi = net.policy.cfg.log_std_min, net.policy.cfg.log_std_max
     assert torch.all(net.policy.log_std >= lo - 1e-6) and torch.all(net.policy.log_std <= hi + 1e-6)
+
+
+def test_모방_손실이_실제로_loss에_합산된다(small_ac, monkeypatch):
+    """`parts["imitation"]` 키가 있다는 것만으로는 부족하다 — 그 키는 미적용일 때도 0.0 으로
+    항상 존재한다. 여기서는 `imitation_loss` 를 갈아 끼워 반환한 텐서가 실제로 역전파돼
+    옵티마이저가 보는 파라미터에 기울기를 남기는지 직접 잰다.
+    """
+    net = small_ac()
+    dummy = torch.nn.Parameter(torch.tensor(0.0))
+    opt = torch.optim.SGD(list(net.parameters()) + [dummy], lr=0.0)   # lr=0: 이동 없이 grad 만 본다
+
+    def fake_imitation_loss(_net, _batch, _cfg):
+        return dummy * 3.0, {"total": 0.0, "control": 0.0, "turn": 0.0}
+
+    monkeypatch.setattr("vtd_rl.rl.ppo.imitation_loss", fake_imitation_loss)
+
+    buf = filled_buffer(net, n_steps=4, n_envs=2)
+    it = dagger_batches(toy_dagger(), 8, generator=torch.Generator().manual_seed(0))
+    update(net, opt, buf, it, PPOConfig(epochs=1, minibatch=1000), step=0,
+           generator=torch.Generator().manual_seed(0))
+    # step=0 이면 imitation_coef == imitation_coef0 == 1.0 이니 grad == 3.0 이어야 한다.
+    assert dummy.grad is not None and abs(dummy.grad.item() - 3.0) < 1e-6
 
 
 def test_가치_손실이_가치를_목표로_당긴다(small_ac):

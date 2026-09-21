@@ -30,10 +30,17 @@ class RolloutBuffer:
         return torch.stack([r[key] for r in self._rows])            # [T, N, ...]
 
     def compute_gae(self, last_value, gamma: float = 0.99, lam: float = 0.95):
+        """GAE 를 거꾸로 훑어 이점·리턴을 만든다.
+
+        `last_value` 는 여기서 즉시 `detach()` 한다 — 호출부가 `torch.no_grad()` 없이 마지막
+        부트스트랩 가치를 넘겨도(Task 6), 이점·리턴에 기울기가 붙어 `ratio * adv` 가 이점 자체를
+        미분해 가치망에 가짜 기울기를 흘리는 일이 없도록 발생원에서 막는다. 롤아웃 내내 오토그래드
+        그래프를 붙들고 있는 메모리 문제도 함께 없앤다.
+        """
         rewards, values, dones = self._stack("reward"), self._stack("value"), self._stack("done")
         adv = torch.zeros_like(rewards)
         running = torch.zeros(self.n_envs, device=self.device)
-        next_value = last_value.to(self.device)
+        next_value = last_value.detach().to(self.device)
         for t in reversed(range(len(self._rows))):
             not_done = 1.0 - dones[t]
             delta = rewards[t] + gamma * next_value * not_done - values[t]

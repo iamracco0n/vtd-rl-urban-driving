@@ -25,6 +25,14 @@ class PPOConfig:
     imitation_coef0: float = 1.0
     imitation_half_life: int = 2_000_000
     target_kl: float = 0.03
+    # 가치 클리핑 폭은 정책 비율 클리핑(clip)과 별개다 — 이 환경의 리턴은 O(100)
+    # (progress 100 · goal 50 · collision -50, 보상 정규화 없음, 스펙 §5)인데 비율용 0.2 를
+    # 그대로 재사용하면 비평가 수렴이 대략 4 배 느려진다(갱신 50 회에 V=63.8 vs 무클립 100.0).
+    value_clip: float = 10.0
+
+
+# 모방 손실은 매 미니배치 M3 학습 설정을 그대로 쓴다 — 새로 만들 이유가 없어 모듈 상수로 뺀다.
+_IMITATION_TRAIN_CFG = TrainConfig()
 
 
 def imitation_coef(step: int, cfg: PPOConfig) -> float:
@@ -43,7 +51,7 @@ def ppo_losses(net, batch, cfg: PPOConfig):
     unclipped = ratio * adv
     clipped = ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip) * adv
     policy = -torch.min(unclipped, clipped).mean()
-    v_clipped = old_value + (value - old_value).clamp(-cfg.clip, cfg.clip)
+    v_clipped = old_value + (value - old_value).clamp(-cfg.value_clip, cfg.value_clip)
     value_loss = 0.5 * torch.max((value - ret) ** 2, (v_clipped - ret) ** 2).mean()
     ent = entropy.mean()
     loss = policy + cfg.value_coef * value_loss - cfg.entropy_coef * ent
@@ -61,11 +69,17 @@ def imitation_loss(net, dagger_batch, cfg: PPOConfig):
     직접 호출하므로(`net(vec, objs, mask) -> mean, log_std, logits`) 반드시 `net.policy` 를
     넘긴다.
     """
-    return policy_loss(net.policy, dagger_batch, TrainConfig())
+    return policy_loss(net.policy, dagger_batch, _IMITATION_TRAIN_CFG)
 
 
 def dagger_batches(dataset, batch_size: int, generator=None, device=None):
-    """M3 라벨을 끝없이 돌린다 — 롤아웃이 수백 번이라 한 바퀴로는 모자란다."""
+    """M3 라벨을 끝없이 돌린다 — 롤아웃이 수백 번이라 한 바퀴로는 모자란다.
+
+    조각이 0 개인(행이 없는) 데이터셋을 넘기면 `dataset.batches()` 가 아무것도 안 내놓아
+    `while True` 안에서 영원히 빈 순회만 도니, 여기서 미리 막는다.
+    """
+    if len(dataset) == 0:
+        raise ValueError("dagger_batches: 데이터셋에 행이 없다")
     while True:
         for batch in dataset.batches(batch_size, generator=generator, device=device):
             yield batch
