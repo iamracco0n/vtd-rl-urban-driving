@@ -220,37 +220,90 @@ def test_학습_곡선_표에_평균_보상_열이_있다():
     assert "102.5" in text and "22.5" in text
 
 
-def test_항목_문턱은_시드3개_합계_기준이라_다른_시드수면_판정을_보류한다():
-    """2026-09-22 리뷰(Important #3): `ITEM7_MAJOR_MAX`/`ITEM2_MAJOR_MAX` 는 시드 3개 합계
+def test_항목_문턱_상수가_사라졌다():
+    """Task 6 정본: 항목별 절대 건수 문턱은 `verdict.judge()` 의 총점·중대 합계 판정으로
 
-    전제인데 결합이 없었다 — `--eval-seeds` 를 바꾸면 판정이 조용히 뒤집힌다(단계①은 시드
-    무관 같은 판 6개라 건수가 시드 수에 정확히 비례한다). 시드 3 이 아니면 문턱을 스케일하지
-    않고 보류해야 한다.
+    대체됐다 — 복사본을 남기지 않는다.
+    """
+    src = open(os.path.join(REPO, "scripts", "report_m4a.py"), encoding="utf-8").read()
+    assert "ITEM7_MAJOR_MAX" not in src and "ITEM2_MAJOR_MAX" not in src
+    assert "_item_goal_line" not in src
+    assert "from vtd_rl.eval.verdict import" in src
+
+
+def test_헤드라인은_전제를_빼고_실질_판정만_센다():
+    """`judge()` 가 낸 네 줄 중 완주율·선생님 대비 점수(`precondition=True`)는 3번(출발점 대비
+
+    점수)에 수학적으로 포함된 전제다 — 헤드라인이 그 둘까지 세면 M4a 를 망친 "형식상 N 줄
+    달성" 부풀림을 재현한다. 실질 판정은 항상 2 줄(출발점 대비 점수·전 항목 중대 위반)뿐이다.
     """
     module = _load_report_m4a_module()
 
-    def ev(goal_rate, mean_score, item, major_count):
-        sheet = [{item: "major"} for _ in range(major_count)]
-        return {"goal_rate": goal_rate, "mean_score": mean_score,
-                "episodes": [EpisodeOutcome("X", 0, "goal", 10, 0.0, mean_score, sheet)]}
+    def ev(goal_rate, mean_score):
+        return {"goal_rate": goal_rate, "mean_score": mean_score, "episodes": []}
 
-    teacher = {"goal_rate": 1.0, "mean_score": 99.0, "episodes": []}
-    teacher_ev = {module.STAGE1_LABEL: teacher, module.STAGE2_LABEL: teacher}
+    # 두 실질 판정 줄(출발점 대비 점수·중대 위반)이 모두 통과하도록 M3 문턱을 넉넉히 넘긴다.
+    m4a_ev = {module.STAGE1_LABEL: ev(1.0, 99.6), module.STAGE2_LABEL: ev(1.0, 95.0)}
+    teacher_ev = {module.STAGE1_LABEL: ev(1.0, 99.0), module.STAGE2_LABEL: ev(1.0, 96.0)}
+    major_totals = {module.STAGE1_LABEL: 0, module.STAGE2_LABEL: 0}
+    text = "\n".join(module._goal_lines(m4a_ev, teacher_ev, major_totals, rows=[], best_step=None,
+                                        eval_seeds=3))
+    assert "실질 판정 2 줄 중 **2 줄 달성**" in text
+    assert "전제" in text
+    # 전제 두 줄(완주율·선생님 대비 점수)의 이름이 "전제" 절 아래 있다 — 헤드라인 숫자에는
+    # 안 들어가지만 성적표에서 사라지진 않는다.
+    assert "완주율" in text.split("전제")[1]
+    assert "선생님 대비 점수" in text.split("전제")[1]
 
-    # 시드 3개(문턱이 전제하는 그 조건)일 때는 정상적으로 달성/미달을 낸다.
-    m4a_ev_3 = {module.STAGE1_LABEL: ev(1.0, 95.0, 2, 4),    # 문턱 4 이하 → 달성
-                module.STAGE2_LABEL: ev(1.0, 95.0, 7, 20)}   # 문턱 19 초과 → 미달
-    text3 = "\n".join(module._goal_lines(m4a_ev_3, teacher_ev, rows=[], best_step=None, eval_seeds=3))
-    assert "보류" not in text3
-    assert "목표 4 줄 중 **3 줄 달성**." in text3
-    assert "항목②" in text3 and "달성" in text3
-    assert "항목⑦" in text3 and "미달" in text3
 
-    # 시드 1개로 돌리면 — 같은 절대 건수라도(오히려 더 적은데도) 문턱을 1/3로 스케일하지 않고
-    # 두 줄 다 보류한다.
-    m4a_ev_1 = {module.STAGE1_LABEL: ev(1.0, 95.0, 2, 4), module.STAGE2_LABEL: ev(1.0, 95.0, 7, 1)}
-    text1 = "\n".join(module._goal_lines(m4a_ev_1, teacher_ev, rows=[], best_step=None, eval_seeds=1))
-    assert text1.count("보류") >= 2
-    assert "목표 4 줄 중 **2 줄 달성**(2 줄 보류" in text1
-    assert "달성" not in text1.split("항목②")[1].split("\n")[0]   # 항목② 줄 자체엔 "달성" 이 없다(보류)
-    assert "미달" not in text1.split("항목⑦")[1].split("\n")[0]   # 항목⑦ 줄 자체엔 "미달" 이 없다(보류)
+def test_항목별_표의_중대_합계는_완주_판만_센다():
+    """`completed_only` 를 빼면 조기 종료(timeout)한 판이 도달 못 한 구간의 위반을 시트에 못
+
+    남겨 중대가 실제보다 적게(또는, 이 예시처럼 완주 못한 판에 중대가 더 있으면 많게) 잡힌다.
+    `major_total(violation_counts(completed_only(ev)))` 순서를 지켜야 한다(Task 6 정본).
+    """
+    module = _load_report_m4a_module()
+    from vtd_rl.eval.verdict import completed_only, major_total
+
+    # 완주 판 1개(중대 1건) + 미완주 판 1개(도달한 구간에 중대 2건 더) — completed_only 를
+    # 빼면 합계가 1이 아니라 3이 된다.
+    episodes = [
+        EpisodeOutcome("A", 0, "goal", 10, 0.0, 90.0, [{2: "major"}]),
+        EpisodeOutcome("A", 1, "timeout", 5, 0.0, 0.0, [{2: "major"}, {2: "major"}]),
+    ]
+    ev = {"episodes": episodes}
+    assert major_total(violation_counts(completed_only(ev))) == 1   # 완주 판만 셌을 때의 참값
+
+    m3_ev = {module.STAGE1_LABEL: ev, module.STAGE2_LABEL: ev}
+    m4a_ev = {module.STAGE1_LABEL: ev, module.STAGE2_LABEL: ev}
+    teacher_ev = {module.STAGE1_LABEL: ev, module.STAGE2_LABEL: ev}
+    text = "\n".join(module._violation_table_lines([module.STAGE1_LABEL, module.STAGE2_LABEL],
+                                                    m3_ev, m4a_ev, teacher_ev))
+    assert "중대 합계" in text
+    assert "| **중대 합계(완주 판 기준)** | — | 1 | — | 1 | — | 1 |" in text
+    assert "| **중대 합계(완주 판 기준)** | — | 3 | — | 3 | — | 3 |" not in text
+
+
+@pytest.mark.slow
+def test_성적표가_중대_합계와_시드_편차를_담는다(tmp_path):
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    root = str(tmp_path / "sweep")
+    sw = subprocess.run([os.path.join(REPO, ".venv", "bin", "python"),
+                         os.path.join(REPO, "scripts", "sweep_ppo.py"),
+                         "--out-root", root, "--name", "smoke", "--seeds", "0", "1",
+                         "--", "--smoke"],
+                        capture_output=True, text=True, env=env, cwd=REPO, timeout=3600)
+    assert sw.returncode == 0, sw.stderr[-3000:]
+
+    report = str(tmp_path / "m4b.md")
+    made = subprocess.run([os.path.join(REPO, ".venv", "bin", "python"),
+                           os.path.join(REPO, "scripts", "report_m4a.py"),
+                           "--run", os.path.join(root, "smoke-s0"),
+                           "--sweep", os.path.join(root, "sweep.json"),
+                           "--out", report, "--skip-eval"],
+                          capture_output=True, text=True, env=env, cwd=REPO, timeout=900)
+    assert made.returncode == 0, made.stderr[-3000:]
+    text = open(report, encoding="utf-8").read()
+    for needed in ("중대 합계", "시드 편차", "rollout_return_mean", "drift_rel"):
+        assert needed in text, needed
