@@ -137,6 +137,23 @@ def _detect_best_step(run_dir: str):
     return None
 
 
+def _train_seed_line(hparams, train_seed_arg) -> str:
+    """학습 시드 — 최우선 출처는 `hparams["seed"]`(`train_ppo.py` 가 실제로 `torch.manual_seed`
+
+    에 준 값)다. 이게 있는 실행(hparams 로깅 이후)에서 "기록 안 됨"이라 말하는 건 산출물에
+    이미 있는 값을 없다고 말하고 사람에게 `--train-seed` 로 다시 손으로 넣으라고 시키는
+    것과 같다(2026-09-22 리뷰) — README 의 "숫자를 손으로 옮겨 적지 않는다" 원칙에 정면으로
+    어긋난다. `hparams` 자체가 없는 실행(로깅 이전, 예: `runs/omen/2026-09-21-ppo`)에서만
+    `--train-seed` 폴백을 쓴다. 어느 경로로 얻었는지 항상 괄호로 밝힌다.
+    """
+    if hparams and hparams.get("seed") is not None:
+        return f"{hparams['seed']}(log.jsonl 의 hparams 에서 읽음)"
+    if train_seed_arg is not None:
+        return (f"{train_seed_arg}(직접 입력값 — 이 실행은 hparams 로깅 이전이라 log.jsonl 에 "
+                "시드가 없다)")
+    return "기록 안 됨(log.jsonl 에 hparams 가 없고 --train-seed 도 안 줬다)"
+
+
 def _best_step_caveat(rows: list, best_step) -> str:
     """`best_step` 이 전체 스텝의 절반 미만이면, 그 시점의 모방 계수와 함께 사실을 그대로 적는다.
 
@@ -157,16 +174,23 @@ def _best_step_caveat(rows: list, best_step) -> str:
 
 
 def _curve_table(rows: list, stage_labels: list) -> list:
+    """평균 보상(`mean_reward`) 도 완주율·점수와 나란히 단계마다 한 열 — 계획서가 명시한 열이고,
+
+    관찰 노트("단계① 평균 보상 102.5 → 22.5")가 바로 이 숫자를 인용하므로 성적표에서도 그
+    숫자를 확인할 수 있어야 한다(2026-09-22 리뷰). `mean_reward` 는 `train_ppo.py` 의
+    `PUBLIC_KEYS` 에 있어 `log.jsonl` 각 줄의 `stages.<라벨>` 에 이미 들어 있다.
+    """
     header = ["스텝", "iter"]
     for i, _label in enumerate(stage_labels, start=1):
-        header += [f"단계{_circled(i)} 완주율", f"단계{_circled(i)} 점수(완주 0점 기준)"]
+        header += [f"단계{_circled(i)} 완주율", f"단계{_circled(i)} 점수(완주 0점 기준)",
+                   f"단계{_circled(i)} 평균 보상"]
     header += ["explained_variance", "log_std", "모방 계수", "approx_kl"]
     lines = ["", "| " + " | ".join(header) + " |", "|" + "|".join("---:" for _ in header) + "|"]
     for r in rows:
         cells = [str(r["step"]), str(r["iter"])]
         for label in stage_labels:
             st = r["stages"][label]
-            cells += [_fmt_pct(st["goal_rate"]), _fmt_score(st["mean_score"])]
+            cells += [_fmt_pct(st["goal_rate"]), _fmt_score(st["mean_score"]), _fmt_score(st["mean_reward"])]
         ev = f"{r['explained_variance']:.3f}" if r.get("explained_variance") is not None else "—"
         log_std = ", ".join(f"{x:.3f}" for x in r["log_std"])
         cells += [ev, log_std, f"{r['imitation_coef']:.3f}", f"{r['approx_kl']:.4f}"]
@@ -257,7 +281,26 @@ def _violation_table_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teache
     return lines
 
 
-def _goal_lines(m4a_ev: dict, teacher_ev: dict, rows: list, best_step) -> list:
+def _item_goal_line(tag: str, item_name: str, major_count: int, max_count: int, eval_seeds: int) -> tuple:
+    """`ITEM7_MAJOR_MAX`/`ITEM2_MAJOR_MAX` 는 **시드 3개 합계**를 전제로 만든 절대 건수다.
+
+    단계①은 액터·신호가 고정이라 시드를 바꿔도 같은 판 6개라서, 항목② 건수가 시드 수에
+    정확히 비례한다(시드 1개 → 5건, 시드 3개 → 15건 — 2026-09-22 리뷰가 실측으로 잡았다).
+    `--eval-seeds` 를 3 이 아닌 값으로 돌리면 판정이 조용히 뒤집힐 수 있으므로, 문턱을 임의로
+    스케일하지 않고(원래 기준이 "시드 3개 합계" 라는 사실 자체가 드러나야 한다) 판정을
+    보류한다. 시드 3개일 때도 어떤 시드 수의 합계인지는 항상 같이 찍는다.
+    """
+    if eval_seeds != 3:
+        return ("보류", f"- 목표: {tag}({item_name}) 중대 위반 ≤{max_count}건(시드 3개 합계 기준) → "
+                        f"**보류** — 이번 평가는 시드 {eval_seeds}개라 문턱(시드 3개 합계 전제)과 "
+                        f"단위가 안 맞는다(실측 {major_count}건, 시드 {eval_seeds}개 합계).")
+    ok = major_count <= max_count
+    verdict = "달성" if ok else "미달"
+    return (verdict, f"- 목표: {tag}({item_name}) 중대 위반 ≤{max_count}건 → **{verdict}** "
+                     f"(실측 {major_count}건, 시드 {eval_seeds}개 합계)")
+
+
+def _goal_lines(m4a_ev: dict, teacher_ev: dict, rows: list, best_step, eval_seeds: int) -> list:
     """목표 네 줄(완주율·점수·항목⑦·항목②) — 이 절이 쓰는 유일한 평가는 마지막 전체 평가
 
     (시드 여러 개, `--eval-seeds`)다. 학습 곡선 표의 주기 평가(시드 1개)는 여기 안 쓴다.
@@ -275,14 +318,20 @@ def _goal_lines(m4a_ev: dict, teacher_ev: dict, rows: list, best_step) -> list:
     goal_ok = s1["goal_rate"] >= GOAL_RATE_MIN and s2["goal_rate"] >= GOAL_RATE_MIN
     score_ok = (s1["mean_score"] >= t1["mean_score"] - SCORE_SLACK
                 and s2["mean_score"] >= t2["mean_score"] - SCORE_SLACK)
-    item2_ok = item2_major <= ITEM2_MAJOR_MAX
-    item7_ok = item7_major <= ITEM7_MAJOR_MAX
-    achieved = sum([goal_ok, score_ok, item7_ok, item2_ok])
+    item7_status, item7_line = _item_goal_line("단계② 항목⑦", rs.score_fma.ITEMS[7], item7_major,
+                                               ITEM7_MAJOR_MAX, eval_seeds)
+    item2_status, item2_line = _item_goal_line("단계① 항목②", rs.score_fma.ITEMS[2], item2_major,
+                                               ITEM2_MAJOR_MAX, eval_seeds)
+    achieved = sum([goal_ok, score_ok, item7_status == "달성", item2_status == "달성"])
+    held = sum([item7_status == "보류", item2_status == "보류"])
 
     def verdict(ok):
         return "달성" if ok else "미달"
 
-    lines = ["", "## 목표 판정", "", f"- 목표 4 줄 중 **{achieved} 줄 달성**.", "",
+    head = (f"- 목표 4 줄 중 **{achieved} 줄 달성**"
+            + (f"({held} 줄 보류 — 시드 수가 3 이 아니라 항목 문턱과 단위가 안 맞는다)."
+               if held else "."))
+    lines = ["", "## 목표 판정", "", head, "",
              f"- 목표: 완주율 — 단계①② 모두 ≥{_fmt_pct(GOAL_RATE_MIN)} → **{verdict(goal_ok)}** "
              f"(실측: 단계① {_fmt_pct(s1['goal_rate'])}, 단계② {_fmt_pct(s2['goal_rate'])})",
              f"- 목표: 점수 — 완주 못 한 판 0점 기준으로 선생님보다 {SCORE_SLACK:.0f}점 넘게 낮지"
@@ -293,10 +342,7 @@ def _goal_lines(m4a_ev: dict, teacher_ev: dict, rows: list, best_step) -> list:
         caveat = _best_step_caveat(rows, best_step)
         if caveat:
             lines.append(f"  - ⚠️ {caveat}")
-    lines += [f"- 목표: 단계② 항목⑦({rs.score_fma.ITEMS[7]}) 중대 위반 ≤{ITEM7_MAJOR_MAX}건 → "
-              f"**{verdict(item7_ok)}** (실측 {item7_major}건)",
-              f"- 목표: 단계① 항목②({rs.score_fma.ITEMS[2]}) 중대 위반 ≤{ITEM2_MAJOR_MAX}건 → "
-              f"**{verdict(item2_ok)}** (실측 {item2_major}건)"]
+    lines += [item7_line, item2_line]
     return lines
 
 
@@ -329,8 +375,8 @@ def main():
                         " 1개)와는 별개로 이 스크립트가 다시 돈다")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--train-seed", type=int, default=None,
-                    help="train_ppo.py 실행 때 준 --seed 값 — log.jsonl 에 안 남으므로 알고 있으면"
-                        " 직접 넘긴다(성적표에 그대로 적는다, 없으면 '기록 안 됨')")
+                    help="hparams 로깅 이전 실행(log.jsonl 에 hparams.seed 가 없는 실행)일 때만 쓰는"
+                        " 폴백 — hparams 가 있으면 거기 적힌 seed 를 그대로 쓰고 이 값은 무시한다")
     ap.add_argument("--skip-eval", action="store_true",
                     help="정책을 실제로 몰아 보는 비교·위반·목표 판정을 건너뛰고 학습 곡선·실행 비교"
                         " 표만 만든다(테스트·빠른 확인용)")
@@ -395,10 +441,7 @@ def main():
              f"- 채점 대상 실행 `{a.run}`(어느 머신에서 돌렸는지는 이 경로로 안다, 예: `runs/omen/...`)"
              f" · 총 스텝 {last['step']} · 걸린 시간(마지막 로그 시점 기준) {last['elapsed_s']:.0f}초 · "
              f"반복(iter) {last['iter']}회",
-             "- 학습 시드: " + (f"{a.train_seed}(직접 입력값 — log.jsonl 에는 학습 시드가 안 남는다)"
-                              if a.train_seed is not None
-                              else "기록 안 됨(log.jsonl 에 학습 시드가 없다 — 알고 있으면 --train-seed 로"
-                                   " 넘겨라)"),
+             "- 학습 시드: " + _train_seed_line(last.get("hparams"), a.train_seed),
              "- 학습에 쓴 커리큘럼: " + (", ".join(f"`{os.path.relpath(p, REPO)}`" for _, p in curricula)
                                     or "(log.jsonl 이 비어 있어 알 수 없다)"),
              "- 학습 곡선 표의 평가는 학습 스크립트가 값싸게 자주 도는 주기 평가로 **시드 1개**다. "
@@ -425,7 +468,7 @@ def main():
     else:
         lines += _comparison_lines(stage_labels, m3_ev, m4a_ev, teacher_ev, a.eval_seeds)
         lines += _violation_table_lines(stage_labels, m3_ev, m4a_ev, teacher_ev)
-        lines += _goal_lines(m4a_ev, teacher_ev, primary_rows, best_steps[a.run])
+        lines += _goal_lines(m4a_ev, teacher_ev, primary_rows, best_steps[a.run], a.eval_seeds)
 
     lines += _notes_lines(a.notes)
 

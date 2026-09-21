@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import subprocess
@@ -10,10 +11,44 @@ REPO = os.path.join(os.path.dirname(__file__), "..", "..")
 PYTHON = os.path.join(REPO, ".venv", "bin", "python")
 
 
+def _load_report_m4a_module():
+    """스크립트를 모듈로 불러온다 — `scripts/` 는 패키지가 아니라 파일 경로로 직접 로드한다
+
+    (`tests/rl/test_train_ppo.py::_load_train_ppo_module` 과 같은 패턴). private 헬퍼
+    (`_train_seed_line`·`_curve_table`·`_item_goal_line`·`_goal_lines`) 를 서브프로세스 없이
+    직접 불러 잠글 때 쓴다.
+    """
+    path = os.path.join(REPO, "scripts", "report_m4a.py")
+    spec = importlib.util.spec_from_file_location("report_m4a_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _env():
     e = dict(os.environ)
     e.pop("PYTHONPATH", None)
     return e
+
+
+def _write_minimal_log(run_dir: str, hparams=None):
+    """`--skip-eval` 경로만 확인할 때 쓰는, 실제 스키마를 그대로 흉내 낸 한 줄짜리 log.jsonl.
+
+    학습을 실제로 돌리지 않아 빠르다 — 실제 필드 이름·모양은 `scripts/train_ppo.py` 가 쓰는
+    것과 정확히 같다(2026-09-21 실측한 실물 스키마).
+    """
+    os.makedirs(run_dir, exist_ok=True)
+    row = {"step": 100, "iter": 1, "elapsed_s": 1.23, "policy": 0.0, "value": 0.0, "entropy": 0.0,
+           "approx_kl": 0.0, "clip_frac": 0.0, "imitation": 0.0, "imitation_coef": 1.0, "updates": 1,
+           "explained_variance": 0.5, "log_std": [-1.0, -1.0],
+           "stages": {"stage1": {"goal_rate": 1.0, "mean_score": 90.0, "mean_score_raw": 90.0,
+                                 "mean_reward": 102.5},
+                      "stage2": {"goal_rate": 0.5, "mean_score": 45.0, "mean_score_raw": 45.0,
+                                 "mean_reward": 22.5}}}
+    if hparams is not None:
+        row["hparams"] = hparams
+    with open(os.path.join(run_dir, "log.jsonl"), "w", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _train_smoke(out_dir: str, *extra: str, timeout: int = 1800) -> subprocess.CompletedProcess:
@@ -129,3 +164,93 @@ def test_notes_파일_내용이_그대로_들어가고_안_주면_정직한_한_
     text2 = open(without_notes, encoding="utf-8").read()
     assert "관찰과 해석 — `--notes` 로 주지 않았다" in text2
     assert marker not in text2
+
+
+def test_학습_시드는_hparams에서_읽고_없으면_train_seed로만_폴백한다(tmp_path):
+    """2026-09-22 리뷰(Important #1): `hparams["seed"]` 가 있는데도 "기록 안 됨" 이라 말하면 안
+
+    된다 — `train_ppo.py` 가 실제로 쓴 값을 성적표 자신이 없다고 말하고 사람에게 손으로
+    다시 넣으라고 시키는 꼴이다. hparams 가 없는(로깅 이전) 실행에서만 `--train-seed` 폴백.
+    """
+    module = _load_report_m4a_module()
+    # 헬퍼 자체의 진리표 — 서브프로세스 없이 직접
+    assert module._train_seed_line({"seed": 0}, None) == "0(log.jsonl 의 hparams 에서 읽음)"
+    assert "직접 입력값" in module._train_seed_line(None, 7)
+    assert module._train_seed_line(None, None) == (
+        "기록 안 됨(log.jsonl 에 hparams 가 없고 --train-seed 도 안 줬다)")
+    assert module._train_seed_line({"seed": 3}, 7) == "3(log.jsonl 의 hparams 에서 읽음)"  # hparams 우선
+
+    # 배선 — main() 이 이 헬퍼를 실제로 불러 성적표에 싣는지 CLI 왕복으로 확인(가짜 log.jsonl,
+    # 학습을 실제로 안 돌려 빠르다)
+    run_with, run_without = str(tmp_path / "run_with"), str(tmp_path / "run_without")
+    _write_minimal_log(run_with, {"seed": 0, "lr": 3e-4, "entropy_coef": 0.005,
+                                  "target_kl": 0.03, "imitation_half_life": 2_000_000})
+    _write_minimal_log(run_without, None)
+
+    out1 = str(tmp_path / "with.md")
+    made1 = _report(["--run", run_with, "--out", out1, "--skip-eval"])
+    assert made1.returncode == 0, made1.stderr[-3000:]
+    text1 = open(out1, encoding="utf-8").read()
+    assert "학습 시드: 0(log.jsonl 의 hparams 에서 읽음)" in text1
+    assert "기록 안 됨" not in text1
+
+    out2 = str(tmp_path / "without.md")
+    made2 = _report(["--run", run_without, "--out", out2, "--skip-eval"])
+    assert made2.returncode == 0, made2.stderr[-3000:]
+    assert "학습 시드: 기록 안 됨" in open(out2, encoding="utf-8").read()
+
+    out3 = str(tmp_path / "fallback.md")
+    made3 = _report(["--run", run_without, "--out", out3, "--skip-eval", "--train-seed", "7"])
+    assert made3.returncode == 0, made3.stderr[-3000:]
+    assert "학습 시드: 7(직접 입력값" in open(out3, encoding="utf-8").read()
+
+
+def test_학습_곡선_표에_평균_보상_열이_있다():
+    """2026-09-22 리뷰(Important #2): 계획서가 명시한 평균 보상 열이 빠져 있었다 — 관찰 노트가
+
+    인용하는 숫자(단계① 102.5 → 22.5)를 성적표에서 확인할 수 있어야 한다.
+    """
+    module = _load_report_m4a_module()
+    rows = [{"step": 100, "iter": 1, "explained_variance": 0.5, "log_std": [-1.0, -1.0],
+             "imitation_coef": 1.0, "approx_kl": 0.01,
+             "stages": {"stage1": {"goal_rate": 1.0, "mean_score": 90.0, "mean_reward": 102.5},
+                        "stage2": {"goal_rate": 0.5, "mean_score": 45.0, "mean_reward": 22.5}}}]
+    text = "\n".join(module._curve_table(rows, ["stage1", "stage2"]))
+    assert "평균 보상" in text
+    assert "102.5" in text and "22.5" in text
+
+
+def test_항목_문턱은_시드3개_합계_기준이라_다른_시드수면_판정을_보류한다():
+    """2026-09-22 리뷰(Important #3): `ITEM7_MAJOR_MAX`/`ITEM2_MAJOR_MAX` 는 시드 3개 합계
+
+    전제인데 결합이 없었다 — `--eval-seeds` 를 바꾸면 판정이 조용히 뒤집힌다(단계①은 시드
+    무관 같은 판 6개라 건수가 시드 수에 정확히 비례한다). 시드 3 이 아니면 문턱을 스케일하지
+    않고 보류해야 한다.
+    """
+    module = _load_report_m4a_module()
+
+    def ev(goal_rate, mean_score, item, major_count):
+        sheet = [{item: "major"} for _ in range(major_count)]
+        return {"goal_rate": goal_rate, "mean_score": mean_score,
+                "episodes": [EpisodeOutcome("X", 0, "goal", 10, 0.0, mean_score, sheet)]}
+
+    teacher = {"goal_rate": 1.0, "mean_score": 99.0, "episodes": []}
+    teacher_ev = {module.STAGE1_LABEL: teacher, module.STAGE2_LABEL: teacher}
+
+    # 시드 3개(문턱이 전제하는 그 조건)일 때는 정상적으로 달성/미달을 낸다.
+    m4a_ev_3 = {module.STAGE1_LABEL: ev(1.0, 95.0, 2, 4),    # 문턱 4 이하 → 달성
+                module.STAGE2_LABEL: ev(1.0, 95.0, 7, 20)}   # 문턱 19 초과 → 미달
+    text3 = "\n".join(module._goal_lines(m4a_ev_3, teacher_ev, rows=[], best_step=None, eval_seeds=3))
+    assert "보류" not in text3
+    assert "목표 4 줄 중 **3 줄 달성**." in text3
+    assert "항목②" in text3 and "달성" in text3
+    assert "항목⑦" in text3 and "미달" in text3
+
+    # 시드 1개로 돌리면 — 같은 절대 건수라도(오히려 더 적은데도) 문턱을 1/3로 스케일하지 않고
+    # 두 줄 다 보류한다.
+    m4a_ev_1 = {module.STAGE1_LABEL: ev(1.0, 95.0, 2, 4), module.STAGE2_LABEL: ev(1.0, 95.0, 7, 1)}
+    text1 = "\n".join(module._goal_lines(m4a_ev_1, teacher_ev, rows=[], best_step=None, eval_seeds=1))
+    assert text1.count("보류") >= 2
+    assert "목표 4 줄 중 **2 줄 달성**(2 줄 보류" in text1
+    assert "달성" not in text1.split("항목②")[1].split("\n")[0]   # 항목② 줄 자체엔 "달성" 이 없다(보류)
+    assert "미달" not in text1.split("항목⑦")[1].split("\n")[0]   # 항목⑦ 줄 자체엔 "미달" 이 없다(보류)
