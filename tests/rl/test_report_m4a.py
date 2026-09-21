@@ -307,3 +307,120 @@ def test_성적표가_중대_합계와_시드_편차를_담는다(tmp_path):
     text = open(report, encoding="utf-8").read()
     for needed in ("중대 합계", "시드 편차", "rollout_return_mean", "drift_rel"):
         assert needed in text, needed
+
+
+def test_진단_곡선_표본_간격_공식과_None_렌더링():
+    """리뷰 지적: `_diagnostic_table` 의 유일한 커버리지가 헤더 문자열 존재 확인뿐이었다 —
+
+    `rows[::step]` 을 `rows[:step]` 으로 바꿔도, `None` 을 `0` 으로 위장해도 안 잡혔다. 값
+    수준으로 직접 잠근다: 40줄을 넣으면(`DIAGNOSTIC_SAMPLE_TARGET=20`) 간격 2, 표본 20줄이
+    나와야 하고, 제목에 그 원본 줄 수·간격이 실제로 찍혀야 하고, `rollout_return_mean=None`
+    인 첫 줄은 `0` 이 아니라 `—` 로 나와야 한다.
+    """
+    module = _load_report_m4a_module()
+    n = 40
+    rows = [{"step": i,
+             "rollout_return_mean": None if i < 5 else float(i),
+             "rollout_return_n": 0 if i < 5 else i,
+             "drift_log_std": 0.001 * i, "drift_rel": 0.01 * i,
+             "entropy": 1.9, "approx_kl": 0.0, "imitation_coef": 1.0}
+            for i in range(n)]
+    expected_step = max(1, n // module.DIAGNOSTIC_SAMPLE_TARGET)
+    expected_sampled = len(rows[::expected_step])
+    assert expected_step == 2 and expected_sampled == 20   # 이 테스트가 실제로 뭘 기대하는지 명시
+
+    lines = module._diagnostic_table(rows)
+    text = "\n".join(lines)
+    # 제목에 원본 줄 수·표본 간격·표본 수가 실제로 찍힌다(무엇을 보고 있는지 알아야 한다).
+    assert f"{n}줄 중 {expected_step}줄 간격 표본 — {expected_sampled}줄" in text
+
+    data_rows = [ln for ln in lines if ln.startswith("| ") and "step |" not in ln
+                and not ln.startswith("|---")]
+    assert len(data_rows) == expected_sampled   # rows[::step] 이 맞다면(rows[:step] 이면 2가 된다)
+
+    # 표본의 첫 행은 step=0(rollout_return_mean=None) → "—" 다. "0" 으로 위장하면 잡힌다.
+    assert data_rows[0] == "| 0 | — | 0 | 0.000 | 0.000 | 1.9000 | 0.0000 | 1.000 |"
+    # 표본에 None 이 아닌 값도 섞여 있고 실제 숫자로 나온다(항상 "—" 로 뭉개지 않는다).
+    # step=2 라 표본은 짝수 인덱스(0, 2, ..., 38)뿐 — 마지막 표본은 38이다.
+    assert any("38.0" in row for row in data_rows)
+
+
+def _write_sweep_json(path: str, sw: dict):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(sw, f, ensure_ascii=False)
+
+
+def test_시드_편차_목표달성_카운트는_실질_판정만_전부_통과한_시드를_센다(tmp_path):
+    """리뷰 지적: `goal_hits` 의 `all(...)` 을 `any(...)` 로 바꾸거나 `precondition` 필터를
+
+    뒤집어도 헤더 문자열만 보는 테스트는 못 잡는다 — 합성 sweep.json 으로 직접 값을 잠근다.
+
+    시드 0: 전제 두 줄은 실패(ok=False)지만 실질 판정 두 줄은 전부 통과 → **세야 한다**
+           (전제가 실패해도 실질 판정만 본다는 것의 증거).
+    시드 1: 실질 판정 중 하나가 실패 → **안 세야 한다**.
+    시드 2: `verdict` 자체가 빈 리스트(학습 실패 등 극단 케이스) → 크래시 없이 **안 세야 한다**.
+    """
+    module = _load_report_m4a_module()
+
+    def real(ok):
+        return {"name": "실질", "ok": ok, "line": "실질 판정 줄", "precondition": False}
+
+    def precondition(ok):
+        return {"name": "전제", "ok": ok, "line": "전제 줄", "precondition": True}
+
+    sweep = {
+        "name": "review", "seeds": [0, 1, 2], "complete": True,
+        "runs": [
+            {"seed": 0, "summary": {"verdict": [precondition(False), precondition(False),
+                                                real(True), real(True)]}},
+            {"seed": 1, "summary": {"verdict": [precondition(True), precondition(True),
+                                                real(True), real(False)]}},
+            {"seed": 2, "summary": {"verdict": []}},
+        ],
+        "spread": {},
+    }
+    path = str(tmp_path / "sweep.json")
+    _write_sweep_json(path, sweep)
+
+    text = "\n".join(module._sweep_lines([path]))
+    assert "3 개 시드 중 1 개" in text   # 시드 0만 세야 한다 — 1이 아니라 2나 3이면 잡힌다
+
+
+def test_시드_편차_complete_false_는_절_맨_위에_드러난다(tmp_path):
+    """`complete: false` 가 조용히 묻히면 부분 결과가 완성본처럼 보인다 — 절 맨 위에 있어야
+
+    한다(리스트 순서를 직접 확인, 텍스트 존재만으론 위치가 안 잠긴다).
+    """
+    module = _load_report_m4a_module()
+    sweep = {"name": "partial", "seeds": [0, 1], "complete": False,
+             "runs": [{"seed": 0, "summary": {"verdict": []}}], "spread": {}}
+    path = str(tmp_path / "sweep_partial.json")
+    _write_sweep_json(path, sweep)
+
+    lines = module._sweep_lines([path])
+    complete_idx = next(i for i, ln in enumerate(lines) if "complete: false" in ln)
+    count_idx = next(i for i, ln in enumerate(lines) if "실제로 끝난" in ln)
+    assert complete_idx < count_idx
+
+
+def test_제목은_기본값을_유지하고_title_인자로_바꿀_수_있다(tmp_path):
+    """리뷰 Minor: 제목이 `# M4a 성적표 — PPO` 로 고정돼 있었다 — M4b 성적표를 이 스크립트로
+
+    만들면 문서 제목이 "M4a" 로 남아 헷갈린다. `--title` 을 새로 받되 기본값은 지금 동작(정확히
+    "M4a 성적표 — PPO")과 같아야 한다.
+    """
+    run_dir = str(tmp_path / "run")
+    _write_minimal_log(run_dir)
+
+    default_out = str(tmp_path / "default.md")
+    made1 = _report(["--run", run_dir, "--out", default_out, "--skip-eval"])
+    assert made1.returncode == 0, made1.stderr[-3000:]
+    assert "# M4a 성적표 — PPO" in open(default_out, encoding="utf-8").read()
+
+    custom_out = str(tmp_path / "custom.md")
+    made2 = _report(["--run", run_dir, "--out", custom_out, "--skip-eval",
+                     "--title", "M4b 성적표 — PPO"])
+    assert made2.returncode == 0, made2.stderr[-3000:]
+    text2 = open(custom_out, encoding="utf-8").read()
+    assert "# M4b 성적표 — PPO" in text2
+    assert "# M4a 성적표 — PPO" not in text2

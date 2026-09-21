@@ -479,6 +479,9 @@ def main():
     ap.add_argument("--sweep", action="append", default=[],
                     help="`sweep_ppo.py` 가 낸 sweep.json(반복 가능) — 시드 편차 표를 만든다"
                         "(M4a 의 '결과 보고 가장 좋은 실행을 고르는' 함정을 막는다)")
+    ap.add_argument("--title", default="M4a 성적표 — PPO",
+                    help="성적표 맨 위 제목(h1) — 기본값은 지금까지의 'M4a 성적표 — PPO' 그대로다"
+                        "(리뷰 Minor: M4b 성적표를 만들 땐 --title 'M4b 성적표 — PPO' 로 넘겨라)")
     a = ap.parse_args()
     if not a.skip_eval and not a.m3:
         ap.error("--skip-eval 이 아니면 --m3(비교할 M3 체크포인트)가 필요하다")
@@ -535,7 +538,7 @@ def main():
                     evs[label] = evaluate_policy(cand.policy, boards, seeds=eval_seeds)
             extra_evs[rd] = evs
 
-    lines = ["# M4a 성적표 — PPO", "",
+    lines = [f"# {a.title}", "",
              f"- 날짜 {datetime.date.today().isoformat()} · 성적표 생성 머신 `{platform.node()}` · "
              f"규칙 스택 `{rs.commit()[:7]}`",
              f"- 채점 대상 실행 `{a.run}`(어느 머신에서 돌렸는지는 이 경로로 안다, 예: `runs/omen/...`)"
