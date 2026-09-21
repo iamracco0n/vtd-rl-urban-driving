@@ -51,3 +51,16 @@ def test_손실은_두_머리의_합이다():
     loss, parts = policy_loss(net, batch, TrainConfig())
     assert torch.isfinite(loss)
     assert abs(parts["total"] - (parts["control"] + 0.5 * parts["turn"])) < 1e-5
+
+
+def test_학습_뒤에도_log_std_범위를_지킨다():
+    """forward() 는 더 이상 자르지 않으므로, train_epochs 가 매 스텝 뒤 clamp_log_std() 를
+    불러야 σ 가 범위를 벗어나지 않는다. 안 그러면 M3 를 망가뜨렸던 σ_steer 붕괴가
+    scripts/run_dagger.py 재실행 시 안전장치 없이 재발한다(코드 리뷰 지적)."""
+    torch.manual_seed(0)
+    net = DrivePolicy(PolicyConfig(trunk=(32, 32), log_std_min=-2.0, log_std_max=0.5))
+    with torch.no_grad():
+        net.log_std.copy_(torch.tensor([-5.0, 5.0]))     # 바닥 아래·천장 위로 동시에 강제
+    train_epochs(net, toy_dataset(64), TrainConfig(epochs=2, batch_size=32))
+    assert torch.all(net.log_std >= net.cfg.log_std_min - 1e-6)
+    assert torch.all(net.log_std <= net.cfg.log_std_max + 1e-6)
