@@ -87,12 +87,38 @@ def _metric(evs: dict) -> tuple:
 def _explained_variance(returns: torch.Tensor, values: torch.Tensor) -> float:
     """비평가가 실제 리턴을 얼마나 따라잡는지 — 1 이면 완벽, 0 이면 평균만 맞히는 것과 같다.
 
-    리턴 분산이 0 에 가까우면(모든 보상이 같은 병적인 경우) 정의가 안 되니 NaN 을 낸다.
+    자동 리셋 더미 행(`valid=0`)은 호출부가 미리 걸러 넘긴다 — 그 행은 학습 배치에도 안
+    들어가니 진단에도 안 들어가야 한다. 리턴 분산이 0 에 가까우면(모든 보상이 같은 병적인
+    경우) 정의가 안 되니 NaN 을 낸다(호출부가 JSON 에 쓰기 전에 `None` 으로 바꾼다).
     """
     var_y = float(returns.var())
     if var_y < 1e-8:
         return float("nan")
     return 1.0 - float((returns - values).var()) / var_y
+
+
+def _bootstrap_reward_done(reward, term, prev_done, value: torch.Tensor):
+    """자동 리셋 더미 행(직전 걸음이 끝난 환경)의 `reward`·`done` 을 고쳐 GAE 사슬을 끊는다.
+
+    gymnasium 1.3 자동 리셋(NEXT_STEP)은 판이 끝난 다음 걸음에서 행동을 무시하고 보상 0·
+    `terminated=False` 를 낸다. `RolloutBuffer.compute_gae` 는 `not_done` 하나로 부트스트랩
+    허용과 사슬 절단을 동시에 정한다 — 이 더미 행의 `done` 을 그대로(=`term`, 거짓) 두면
+    `delta = γ·V(새 판 첫 관측) − V(끝난 판 마지막 관측)` 이 계산되고, 그 값이 `(γλ)^k` 로
+    감쇠하며 이전(진짜) 걸음들의 이점에 새어 든다 — truncated(시간 초과·정체)로 끝난 판일수록
+    V(새 판 시작)이 크고 V(정체 판 마지막)은 작아 체계적으로 양의 이점이 새어나간다("판을
+    빨리 포기하면 이득"을 학습하게 된다, 2026-09-21 리뷰 재현).
+
+    더미 행의 `reward` 를 제 `value` 로, `done` 을 1 로 주면 `delta = value − value = 0` 이고
+    `not_done = 0` 이라 사슬이 정확히 그 자리에서 끊긴다 — 이 행 자체는 `valid=0` 이라 학습
+    배치에는 어차피 안 들어간다. 진짜 종료(terminated)·계속되는 걸음(`prev_done` 이 거짓인
+    행)은 손대지 않는다.
+    """
+    dummy = torch.as_tensor(prev_done, device=value.device)
+    reward_t = torch.as_tensor(reward, dtype=torch.float32, device=value.device)
+    done_t = torch.as_tensor(term, dtype=torch.float32, device=value.device)
+    reward_t = torch.where(dummy, value.detach(), reward_t)
+    done_t = torch.where(dummy, torch.ones_like(done_t), done_t)
+    return reward_t, done_t
 
 
 def main():
@@ -125,6 +151,8 @@ def main():
         a.eval_seeds, a.final_eval_seeds = 1, 1
     if a.steps < 1:
         ap.error("--steps 는 1 이상이어야 한다")
+    if a.eval_every < 1:
+        ap.error("--eval-every 는 1 이상이어야 한다(0 이면 while next_eval<=step 이 안 끊긴다)")
 
     log_path = os.path.join(a.out, "log.jsonl")
     if os.path.exists(log_path) or glob.glob(os.path.join(a.out, "ac-*.pt")):
@@ -137,16 +165,19 @@ def main():
     stages = _stage_boards(a.curricula, a.smoke)
 
     cfg = PPOConfig()
-    venv = make_vec_env(a.curricula, a.envs, EnvConfig(), seed=a.seed, asynchronous=not a.smoke)
-    net = (ActorCritic.from_policy(a.init, device=dev) if a.init else ActorCritic()).to(dev)
-    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
-    buf = RolloutBuffer(a.rollout, a.envs, dev)
-    gen = torch.Generator().manual_seed(a.seed)
-    dagger_iter = (dagger_batches(load_dir(a.dagger_data), TrainConfig().batch_size,
-                                  generator=gen, device=dev) if a.dagger_data else None)
-
-    t0 = time.perf_counter()
+    venv = None
     try:
+        # venv 는 서브프로세스(비동기 벡터 환경)를 띄운다 — `--init` 오타 등으로 그 아래 어떤
+        # 준비 코드가 죽어도 finally 가 반드시 타도록 venv 생성부터 이 try 안에 둔다.
+        venv = make_vec_env(a.curricula, a.envs, EnvConfig(), seed=a.seed, asynchronous=not a.smoke)
+        net = (ActorCritic.from_policy(a.init, device=dev) if a.init else ActorCritic()).to(dev)
+        opt = torch.optim.Adam(net.parameters(), lr=cfg.lr)
+        buf = RolloutBuffer(a.rollout, a.envs, dev)
+        gen = torch.Generator().manual_seed(a.seed)
+        dagger_iter = (dagger_batches(load_dir(a.dagger_data), TrainConfig().batch_size,
+                                      generator=gen, device=dev) if a.dagger_data else None)
+
+        t0 = time.perf_counter()
         obs, _info = venv.reset(seed=a.seed)
         updates = 0
         prev_done = np.zeros(a.envs, dtype=bool)   # 직전 걸음에 끝난 환경 = 이번 걸음은 자동 리셋 더미
@@ -156,19 +187,24 @@ def main():
 
         while step < a.steps:
             buf.reset()
-            values_log = []
+            values_log, valid_log = [], []
             for _ in range(a.rollout):
                 vec, objs, mask = (torch.as_tensor(x, device=dev) for x in vec_obs_to_arrays(obs))
                 with torch.no_grad():
                     out = net.act(vec, objs, mask, generator=gen)
                 action = {"control": out["control"].cpu().numpy(), "turn": out["turn"].cpu().numpy()}
                 obs, reward, term, trunc, _info = venv.step(action)
+                # 자동 리셋 더미 행(prev_done)은 reward=제 가치·done=1 로 줘서 GAE 사슬을 끊는다
+                # (`_bootstrap_reward_done` 참고) — `done` 에 `term` 만 그대로 넣으면 truncated
+                # 로 끝난 판 뒤에서 다음 판의 큰 가치가 (γλ)^k 로 새어 든다.
+                reward_t, done_t = _bootstrap_reward_done(reward, term, prev_done, out["value"])
+                valid_np = ~prev_done
                 buf.add(vec=vec, objs=objs, mask=mask, raw=out["raw"], turn=out["turn"],
                         log_prob=out["log_prob"], value=out["value"],
-                        reward=torch.as_tensor(reward, dtype=torch.float32),
-                        done=torch.as_tensor(term, dtype=torch.float32),   # 중단은 부트스트랩
-                        valid=torch.as_tensor(~prev_done, dtype=torch.float32))
+                        reward=reward_t, done=done_t,
+                        valid=torch.as_tensor(valid_np, dtype=torch.float32))
                 values_log.append(out["value"].detach())
+                valid_log.append(torch.as_tensor(valid_np, dtype=torch.bool, device=dev))
                 prev_done = np.asarray(term) | np.asarray(trunc)
                 step += a.envs
             with torch.no_grad():
@@ -185,16 +221,23 @@ def main():
             updates += 1
 
             if step >= next_eval or step >= a.steps:
-                ev_var = _explained_variance(buf.returns, torch.stack(values_log))
+                # 진단(explained variance)도 `valid` 로 자동 리셋 더미 행을 뺀다 — 학습 배치에
+                # 안 들어가는 행이 진단에는 섞이면 안 된다.
+                values_t, valid_t = torch.stack(values_log), torch.stack(valid_log)
+                ev_var = _explained_variance(buf.returns[valid_t], values_t[valid_t])
                 net.eval()
                 evs = _evaluate_stages(net.policy, stages, tuple(range(a.eval_seeds)))
                 net.train()
                 # `stats["updates"]` 는 이 롤아웃 안에서 도른 미니배치 최적화 걸음 수(ppo.update() 자체
                 # 반환값)다 — 바깥 루프 반복 횟수(우리 `updates` 변수)와 이름이 겹치므로 `iter` 로 적는다.
+                # 단계 결과는 "stages" 하위에 감싼다 — 커리큘럼 파일 이름을 그대로 키로 쓰면(예:
+                # 누가 커리큘럼을 "policy.json" 처럼 지으면) 다른 통계 키와 겹칠 수 있다(`updates`
+                # 이름 충돌로 한 번 데었다).
                 row = {"step": step, "iter": updates, "elapsed_s": time.perf_counter() - t0,
-                       **stats, "explained_variance": ev_var,
+                       **stats,
+                       "explained_variance": ev_var if ev_var == ev_var else None,  # NaN → None(표준 JSON)
                        "log_std": net.policy.log_std.detach().cpu().tolist(),
-                       **{label: _public(ev) for label, ev in evs.items()}}
+                       "stages": {label: _public(ev) for label, ev in evs.items()}}
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 net.save(os.path.join(a.out, f"ac-{step}.pt"))
@@ -204,7 +247,8 @@ def main():
                 while next_eval <= step:
                     next_eval += a.eval_every
     finally:
-        venv.close()
+        if venv is not None:
+            venv.close()
 
     # 학습이 끝난 뒤 딱 한 번 전체 평가(--final-eval-seeds) — 이 값으로 ac-best.pt 를 최종
     # 선정하고 요약 JSON 을 채운다(주기 평가는 --eval-seeds 로 값싸게, 최종 선정만 신뢰도 있게).
@@ -225,9 +269,11 @@ def main():
         net.save(os.path.join(a.out, "ac-best.pt"))
         chosen_evs, chosen_step = final_evs, step
 
-    summary = {"steps": step, "updates": updates, "seconds": time.perf_counter() - t0,
+    # `iters` = 바깥 루프(롤아웃) 반복 횟수 — log.jsonl 의 `updates`(ppo.update 내부 미니배치 수)와
+    # 다른 뜻이라 요약 쪽은 이름을 갈랐다.
+    summary = {"steps": step, "iters": updates, "seconds": time.perf_counter() - t0,
                "best_step": chosen_step,
-               **{label: _public(ev) for label, ev in chosen_evs.items()}}
+               "stages": {label: _public(ev) for label, ev in chosen_evs.items()}}
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 
