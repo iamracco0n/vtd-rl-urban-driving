@@ -80,6 +80,17 @@ def _evaluate_stages(policy, stages, seeds) -> dict:
     return {label: evaluate_policy(policy, boards, seeds=seeds) for label, boards in stages}
 
 
+def _major_totals(evs: dict) -> dict:
+    """완주한 판만 걸러 중대 위반을 센다 — `completed_only` 를 빼면 조기 종료한 판이 중대를
+
+    덜 잡혀 목표 4번(전 항목 중대 위반)이 부당하게 통과한다(2026-09-21 리뷰). 이름 있는
+    함수로 떼어 `evaluate_policy` 서브프로세스 없이 가짜 `ev` 로 단위 테스트한다
+    (`tests/rl/test_train_ppo.py`).
+    """
+    return {label: major_total(violation_counts(completed_only(ev)))
+            for label, ev in evs.items()}
+
+
 def _metric(evs: dict) -> tuple:
     """단계 평균 완주율 → 동률이면 단계 평균 점수. `ac-best.pt` 선정·주기 최고 추적에 같이 쓴다."""
     n = max(len(evs), 1)
@@ -195,6 +206,13 @@ def _build_optimizer(net, cfg: PPOConfig) -> torch.optim.Optimizer:
 def main():
     ap = _build_parser()
     a = ap.parse_args()
+    # 검증을 --smoke 덮어쓰기보다 먼저 한다 — 순서가 반대면 `--smoke --steps 0`·
+    # `--smoke --eval-every 0` 처럼 사용자가 준 잘못된 값이 검증 전에 스모크 기본값으로
+    # 조용히 덮여 에러가 안 난다(2026-09-22 리뷰 지적).
+    if a.steps < 1:
+        ap.error("--steps 는 1 이상이어야 한다")
+    if a.eval_every < 1:
+        ap.error("--eval-every 는 1 이상이어야 한다(0 이면 while next_eval<=step 이 안 끊긴다)")
     if a.smoke:
         a.envs, a.steps, a.rollout = 2, 4000, 64
         a.eval_seeds, a.final_eval_seeds = 1, 1
@@ -203,10 +221,6 @@ def main():
         # 볼 수가 없다(2026-09-21 실측: 이 값을 안 좁히면 test_연습_모드가_계측과_판정을_남긴다
         # 가 자기 자신과 비교하게 되어 못 통과한다). 두 번(중간·끝) 이상 걸리게 절반으로 줄인다.
         a.eval_every = max(1, a.steps // 2)
-    if a.steps < 1:
-        ap.error("--steps 는 1 이상이어야 한다")
-    if a.eval_every < 1:
-        ap.error("--eval-every 는 1 이상이어야 한다(0 이면 while next_eval<=step 이 안 끊긴다)")
 
     log_path = os.path.join(a.out, "log.jsonl")
     if os.path.exists(log_path) or glob.glob(os.path.join(a.out, "ac-*.pt")):
@@ -265,7 +279,7 @@ def main():
                 with torch.no_grad():
                     out = net.act(vec, objs, mask, generator=gen)
                 action = {"control": out["control"].cpu().numpy(), "turn": out["turn"].cpu().numpy()}
-                obs, reward, term, trunc, _info = venv.step(action)
+                obs, reward, term, trunc, info = venv.step(action)
                 # 자동 리셋 더미 행(prev_done)은 reward=제 가치·done=1 로 줘서 GAE 사슬을 끊는다
                 # (`_bootstrap_reward_done` 참고) — `done` 에 `term` 만 그대로 넣으면 truncated
                 # 로 끝난 판 뒤에서 다음 판의 큰 가치가 (γλ)^k 로 새어 든다.
@@ -283,7 +297,7 @@ def main():
                 tracker.add(reward, done_mask)
                 # 종료 사유 집계 — `outcome` 은 "running" 이 아닌 스텝(그 판이 실제로 끝난
                 # 스텝)에만 실린다(OutcomeCounter 가 스스로 거른다).
-                outcomes.add(_info)
+                outcomes.add(info)
                 prev_done = done_mask
                 step += a.envs
             with torch.no_grad():
@@ -299,35 +313,40 @@ def main():
                 p.requires_grad_(True)
             updates += 1
 
+            # 롤아웃마다 가벼운 진단 줄을 남긴다 — 평가(비싸다)를 기다리면 3M 실행에 약
+            # 6줄뿐이라 M4a 가 무너진 1M~1.5M 구간을 점 2개로만 보게 된다(2026-09-22 리뷰
+            # 지적). 여기 들어가는 값은 전부 이미 계산돼 있던 것이라 비용이 사실상 0이다.
+            # 진단(explained variance)도 `valid` 로 자동 리셋 더미 행을 뺀다 — 학습 배치에
+            # 안 들어가는 행이 진단에도 안 들어가야 한다.
+            values_t, valid_t = torch.stack(values_log), torch.stack(valid_log)
+            ev_var = _explained_variance(buf.returns[valid_t], values_t[valid_t])
+            # `stats["updates"]` 는 이 롤아웃 안에서 도른 미니배치 최적화 걸음 수(ppo.update() 자체
+            # 반환값)다 — 바깥 루프 반복 횟수(우리 `updates` 변수)와 이름이 겹치므로 `iter` 로 적는다.
+            # `tracker.stats()`(rollout_return_mean/_n·rollout_len_mean)와
+            # `policy_drift()`(drift_l2/_rel/_log_std/_rest_rel)는 이름이 서로 겹치지 않고
+            # `stats`(policy/value/entropy/approx_kl/clip_frac/imitation/imitation_coef/updates)
+            # 와도 안 겹친다(M4a 에서 `**stats` 가 바깥 `updates` 를 조용히 덮어쓴 적이 있어
+            # 대조해 확인했다).
+            row = {"step": step, "iter": updates, "elapsed_s": time.perf_counter() - t0,
+                   **stats,
+                   **tracker.stats(),
+                   **policy_drift(net, ref_state),
+                   "explained_variance": ev_var if ev_var == ev_var else None,  # NaN → None(표준 JSON)
+                   "log_std": net.policy.log_std.detach().cpu().tolist(),
+                   "hparams": hparams}
+
             if step >= next_eval or step >= a.steps:
-                # 진단(explained variance)도 `valid` 로 자동 리셋 더미 행을 뺀다 — 학습 배치에
-                # 안 들어가는 행이 진단에는 섞이면 안 된다.
-                values_t, valid_t = torch.stack(values_log), torch.stack(valid_log)
-                ev_var = _explained_variance(buf.returns[valid_t], values_t[valid_t])
                 net.eval()
                 evs = _evaluate_stages(net.policy, stages, tuple(range(a.eval_seeds)))
                 net.train()
-                # `stats["updates"]` 는 이 롤아웃 안에서 도른 미니배치 최적화 걸음 수(ppo.update() 자체
-                # 반환값)다 — 바깥 루프 반복 횟수(우리 `updates` 변수)와 이름이 겹치므로 `iter` 로 적는다.
-                # 단계 결과는 "stages" 하위에 감싼다 — 커리큘럼 파일 이름을 그대로 키로 쓰면(예:
-                # 누가 커리큘럼을 "policy.json" 처럼 지으면) 다른 통계 키와 겹칠 수 있다(`updates`
-                # 이름 충돌로 한 번 데었다).
-                # `tracker.stats()`(rollout_return_mean/_n·rollout_len_mean)와
-                # `policy_drift()`(drift_l2/_rel/_log_std/_rest_rel)는 이름이 서로 겹치지 않고
-                # `stats`(policy/value/entropy/approx_kl/clip_frac/imitation/imitation_coef/updates)
-                # 와도 안 겹친다 — `outcomes.stats()` 는 매 키가 `outcome_` 로 시작해 마찬가지다
-                # (M4a 에서 `**stats` 가 바깥 `updates` 를 조용히 덮어쓴 적이 있어 대조해 확인했다).
-                row = {"step": step, "iter": updates, "elapsed_s": time.perf_counter() - t0,
-                       **stats,
-                       **tracker.stats(),
-                       **policy_drift(net, ref_state),
-                       **outcomes.stats(),
-                       "explained_variance": ev_var if ev_var == ev_var else None,  # NaN → None(표준 JSON)
-                       "log_std": net.policy.log_std.detach().cpu().tolist(),
-                       "stages": {label: _public(ev) for label, ev in evs.items()},
-                       "hparams": hparams}
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                # 평가 줄에만 그 구간의 종료 사유 집계를 더 싣는다 — `outcomes.stats()` 는 매
+                # 키가 `outcome_` 로 시작해 위 dict 들과 안 겹친다. 단계 결과는 "stages" 하위에
+                # 감싼다 — 커리큘럼 파일 이름을 그대로 키로 쓰면(예: 누가 커리큘럼을
+                # "policy.json" 처럼 지으면) 다른 통계 키와 겹칠 수 있다(`updates` 이름 충돌로
+                # 한 번 데었다). 평가 줄만 고르려면 `"stages" in row` 로 거른다(Task 6 성적표가
+                # 이 자리로 평가 줄을 구분한다).
+                row.update(outcomes.stats())
+                row["stages"] = {label: _public(ev) for label, ev in evs.items()}
                 net.save(os.path.join(a.out, f"ac-{step}.pt"))
                 metric = _metric(evs)
                 if best_metric is None or metric > best_metric:
@@ -335,6 +354,9 @@ def main():
                 outcomes = OutcomeCounter()   # 다음 평가 구간 집계를 새로 시작한다
                 while next_eval <= step:
                     next_eval += a.eval_every
+
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
     finally:
         if venv is not None:
             venv.close()
@@ -373,8 +395,7 @@ def main():
     teacher_evs = {label: evaluate_teacher(boards, seeds=(0,)) for label, boards in stages}
     # 미완주 판은 도달 못 한 구간의 위반이 채점표에 없어 중대가 실제보다 적게 잡힌다 —
     # `completed_only` 로 완주한 판만 걸러야 조기 종료가 이득으로 보이지 않는다.
-    majors = {label: major_total(violation_counts(completed_only(ev)))
-             for label, ev in chosen_evs.items()}
+    majors = _major_totals(chosen_evs)
     verdict = judge(chosen_evs, teacher_evs, majors, eval_seeds=a.final_eval_seeds)
     summary["verdict"] = [{"name": v.name, "ok": v.ok, "line": v.line, "precondition": v.precondition}
                           for v in verdict]

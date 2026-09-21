@@ -185,8 +185,33 @@ def test_연습_모드가_계측과_판정을_남긴다(tmp_path):
     # — M4b 설계에서 "가장 중요하다"고 지목한 값이라 별도 단언을 둔다).
     assert rows[0]["drift_l2"] < rows[-1]["drift_l2"]
     assert rows[0]["drift_log_std"] < rows[-1]["drift_log_std"]
+    # 평가 줄만 "stages" 로 걸러진다 — Task 6 성적표가 이 자리로 평가 줄을 고른다.
     evals = [r for r in rows if "stages" in r]
     assert evals and any(k.startswith("outcome_") for k in evals[-1])
+    # 롤아웃마다 한 줄(가벼운 진단)이 남아 평가 줄보다 로그 해상도가 높아야 한다 — 2026-09-22
+    # 리뷰 지적(3M 실행에서 평가만으로는 약 6줄뿐이라 붕괴 구간을 점 2개로만 본다).
+    assert len(rows) > len(evals)
+    # ReturnTracker 와 OutcomeCounter, 서로 다른 두 계측기의 교차 일관성 — 실행 내내 완주한
+    # 판 총수는 어느 쪽으로 세도 같아야 한다(M4a 의 갱신 횟수 8배 오류와 같은 종류의 버그를
+    # 잡는 자리). 단, 이 등식은 이동창(30)이 아직 안 찼을 때만 성립한다 — 완주 판이 30개를
+    # 넘으면 tracker 쪽 rollout_return_n 은 30에서 잘리고 outcomes 쪽 누적 합만 계속 커진다
+    # (스모크는 판 수가 적어 항상 30 미만이라 성립한다).
+    total_outcomes = sum(v for r in rows for k, v in r.items() if k.startswith("outcome_"))
+    assert total_outcomes == rows[-1]["rollout_return_n"]
+
+
+def test_중대_집계가_완주_판만_센다():
+    """`_major_totals` 가 `completed_only` 를 실제로 거치는지 — 서브프로세스도, 완주하는
+
+    정책도 필요 없다. `completed_only` 는 `ev["episodes"]` 만 보고 `violation_counts` 는
+    `e.sheet` 만 보므로 `EpisodeOutcome` 의 나머지 필드는 아무 값이나 된다(2026-09-22 리뷰).
+    `completed_only` 가 빠지면(=미완주 판까지 센다) 결과가 1 이 아니라 2 가 된다.
+    """
+    mod = _load_train_ppo_module()
+    from vtd_rl.policy.evaluate import EpisodeOutcome
+    ev = {"episodes": [EpisodeOutcome("b", 0, "goal",    10, 0.0, 100.0, [{"②": "major"}]),
+                       EpisodeOutcome("b", 1, "timeout",  5, 0.0,   0.0, [{"②": "major"}])]}
+    assert mod._major_totals({"stage1": ev}) == {"stage1": 1}   # 2 면 completed_only 가 빠진 것
 
 
 def test_시그마_모드가_cfg에_닿는다():
@@ -195,3 +220,25 @@ def test_시그마_모드가_cfg에_닿는다():
     assert mod._build_cfg(a).imitation_sigma == "detach"
     b = mod._build_parser().parse_args(["--out", "x"])
     assert mod._build_cfg(b).imitation_sigma == "learn"
+
+
+def test_smoke가_eval_every_0_을_가리지_않는다():
+    """`--smoke` 가 `--eval-every` 검증보다 먼저 스모크 기본값으로 덮어쓰면 `--eval-every 0`
+
+    같은 잘못된 값이 검증 없이 통과한다(2026-09-22 리뷰 지적) — `--steps 0` 도 같은 함정이라
+    같이 확인한다. `main()` 은 이 두 검증을 통과 못 하면 무거운 준비(venv·모델) 전에
+    `SystemExit`(argparse `error()`)로 죽으므로 서브프로세스 없이 빠르게 돈다.
+    """
+    import sys
+    mod = _load_train_ppo_module()
+    old_argv = sys.argv
+    try:
+        for bad_args in (["train_ppo.py", "--smoke", "--out", "/tmp/불필요-존재안함",
+                          "--eval-every", "0"],
+                         ["train_ppo.py", "--smoke", "--out", "/tmp/불필요-존재안함",
+                          "--steps", "0"]):
+            sys.argv = bad_args
+            with pytest.raises(SystemExit):
+                mod.main()
+    finally:
+        sys.argv = old_argv
