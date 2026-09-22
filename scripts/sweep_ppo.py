@@ -15,12 +15,17 @@ M4a 는 설정마다 시드 하나였다. M3 에서 같은 명령이 완주율 0
 받아 뒤엣것이 조용히 이겨(세 시드가 전부 같은 값으로 도는데 에러가 안 남) 스윕의 목적 자체를
 무효화한다(2026-09-21 리뷰 지적). 지금은 `extra` 에 이 둘이 보이면 `ap.error` 로 막는다.
 
-시드마다 성공하는 즉시 `<out-root>/<name>-s<seed>/summary.json` 을 쓰고 `<out-root>/sweep.json`
-을 그때까지의 결과로 다시 쓴다(`"complete": false`) — 9 개 중 8 번째가 죽어도 앞선 7 개의
-cross-seed 통계(스프레드)가 파이썬 지역 변수 속에서만 살다 사라지지 않는다(2026-09-21 리뷰
-지적: 원래 스켈레톤은 루프가 끝까지 성공해야만 sweep.json 을 썼다). 부분 실패 뒤 같은 명령을
-그냥 다시 돌리면 이미 끝난 시드가 재사용 가드에 걸려 또 죽으므로, `--resume` 을 주면 이미
-`summary.json` 이 있는 시드는 다시 안 돌리고 그 파일을 읽어 쓴다.
+시드마다 성공하는 즉시 `<out-root>/<name>-s<seed>/summary.json` 을 쓰고
+`<out-root>/<name>-sweep.json` 을 그때까지의 결과로 다시 쓴다(`"complete": false`) — 9 개 중
+8 번째가 죽어도 앞선 7 개의 cross-seed 통계(스프레드)가 파이썬 지역 변수 속에서만 살다
+사라지지 않는다(2026-09-21 리뷰 지적: 원래 스켈레톤은 루프가 끝까지 성공해야만 파일을 썼다).
+부분 실패 뒤 같은 명령을 그냥 다시 돌리면 이미 끝난 시드가 재사용 가드에 걸려 또 죽으므로,
+`--resume` 을 주면 이미 `summary.json` 이 있는 시드는 다시 안 돌리고 그 파일을 읽어 쓴다.
+
+집계 파일 이름에 `name` 이 들어간다(`<name>-sweep.json`, 고정 이름 `sweep.json` 아님) — 같은
+`--out-root` 에 `--name` 만 바꿔 설정 여러 개를 연달아 돌려도 서로 안 덮어쓴다(2026-09-22
+운영 사고: 세 설정을 같은 out-root 에 연달아 돌렸다가 고정 이름 탓에 마지막 설정만 남았다,
+에러도 경고도 없이 — 다행히 시드별 `summary.json` 은 살아 있어 `--resume` 으로 복구했다).
 """
 import argparse, json, os, subprocess, sys, time
 
@@ -46,11 +51,17 @@ def _forbidden_flag(extra):
 
 
 def _write_sweep_json(out_root, name, seeds, runs, complete):
-    """지금까지 모은 `runs` 로 `spread` 를 다시 계산해 `sweep.json` 을 (다시) 쓴다.
+    """지금까지 모은 `runs` 로 `spread` 를 다시 계산해 `<out_root>/<name>-sweep.json` 을 (다시) 쓴다.
 
     실행이 하나만 있어도 `spread` 는 계산할 수 있다(min==max==mean) — 다만 `complete`가
     거짓이면 아직 다 안 돈 부분 결과라는 뜻이니, 읽는 쪽이 완성본으로 착각하지 않도록 그
     플래그를 같이 남긴다.
+
+    파일 이름에 `name` 을 넣는다(예전엔 고정으로 `sweep.json` 이었다) — 같은 `--out-root` 에
+    `--name` 만 바꿔 설정 여러 개를 연달아 돌리면 고정 이름은 서로 덮어써 마지막 설정만
+    남는다(2026-09-22 실측: 실제 본 실험 9 회 중 세 스윕이 이렇게 사라졌다, 에러도 경고도
+    없이). 같은 `out_root`·같은 `name` 으로 두 번 돌리는 건 여전히 덮어쓰지만, 그건
+    `--resume` 이 다루는 정상 경로다.
     """
     spread = {}
     if runs:
@@ -59,7 +70,7 @@ def _write_sweep_json(out_root, name, seeds, runs, complete):
                              for k in ("goal_rate", "mean_score")}
     summary = {"name": name, "seeds": seeds, "runs": runs, "spread": spread, "complete": complete}
     os.makedirs(out_root, exist_ok=True)
-    with open(os.path.join(out_root, "sweep.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(out_root, f"{name}-sweep.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=1)
     return summary
 

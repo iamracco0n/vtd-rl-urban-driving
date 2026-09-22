@@ -79,7 +79,7 @@ def test_시드_두_개를_돌리고_편차를_모은다(tmp_path):
     for stage in ("stage1", "stage2"):
         sp = summary["spread"][stage]["mean_score"]
         assert sp["min"] <= sp["mean"] <= sp["max"]
-    assert os.path.exists(tmp_path / "sweep" / "sweep.json")
+    assert os.path.exists(tmp_path / "sweep" / "smoke-sweep.json")
     assert os.path.exists(tmp_path / "sweep" / "smoke-s0" / "log.jsonl")
     assert os.path.exists(tmp_path / "sweep" / "smoke-s1" / "log.jsonl")
     # 시드마다 개별 요약도 즉시 남아야 한다(재개·부분 실패 복구의 근거).
@@ -128,10 +128,10 @@ def test_둘째_시드가_실패해도_첫_시드_결과는_남고_resume이_건
                           env=_env(), cwd=REPO, timeout=900)
     assert out1.returncode != 0
 
-    # ① 첫 시드(성공)의 결과가 개별 파일로도, 부분 sweep.json 으로도 남아 있어야 한다.
+    # ① 첫 시드(성공)의 결과가 개별 파일로도, 부분 <name>-sweep.json 으로도 남아 있어야 한다.
     s0_summary_path = sweep_dir / "bad-s0" / "summary.json"
     assert s0_summary_path.exists()
-    with open(sweep_dir / "sweep.json", encoding="utf-8") as f:
+    with open(sweep_dir / "bad-sweep.json", encoding="utf-8") as f:
         partial = json.load(f)
     assert partial["complete"] is False
     assert [r["seed"] for r in partial["runs"]] == [0]
@@ -152,3 +152,37 @@ def test_둘째_시드가_실패해도_첫_시드_결과는_남고_resume이_건
         saved_s0 = json.load(f)
     reused = next(r["summary"] for r in final["runs"] if r["seed"] == 0)
     assert reused == saved_s0
+
+
+@pytest.mark.slow
+def test_같은_out_root에_이름만_다른_스윕_둘을_돌리면_둘_다_남는다(tmp_path):
+    """2026-09-22 운영 사고 재현·잠금: 집계 파일 이름이 `sweep.json` 으로 고정이던 시절,
+
+    같은 `--out-root` 에 `--name` 만 바꿔 설정 세 개를 연달아 돌렸더니 서로 덮어써 마지막
+    설정만 남았다 — 에러도 경고도 없었다(시드별 `summary.json` 덕에 데이터 자체는 안 잃었지만,
+    이 스크립트가 약속한 cross-seed 집계는 두 번 사라졌다). 파일 이름에 `name` 을 넣어
+    `<out-root>/<name>-sweep.json` 으로 고쳤다 — 여기서는 같은 out-root 에 이름이 다른 스윕을
+    두 번 돌려 둘 다 살아남는지 직접 잠근다(원래 테스트는 스윕을 하나만 돌려서 이 결함을
+    아예 건드리지 못했다).
+    """
+    out_root = tmp_path / "sweep"
+    common = [PYTHON, SWEEP, "--out-root", str(out_root), "--seeds", "0"]
+    out_a = subprocess.run(common + ["--name", "cfg-a", "--", "--smoke"],
+                           capture_output=True, text=True, env=_env(), cwd=REPO, timeout=900)
+    assert out_a.returncode == 0, out_a.stderr[-3000:]
+    out_b = subprocess.run(common + ["--name", "cfg-b", "--", "--smoke"],
+                           capture_output=True, text=True, env=_env(), cwd=REPO, timeout=900)
+    assert out_b.returncode == 0, out_b.stderr[-3000:]
+
+    # 둘 다 남아 있어야 한다 — 이름이 고정이던 버그라면 cfg-b 가 cfg-a 를 덮어써 사라졌을 것.
+    assert os.path.exists(out_root / "cfg-a-sweep.json")
+    assert os.path.exists(out_root / "cfg-b-sweep.json")
+    with open(out_root / "cfg-a-sweep.json", encoding="utf-8") as f:
+        summary_a = json.load(f)
+    with open(out_root / "cfg-b-sweep.json", encoding="utf-8") as f:
+        summary_b = json.load(f)
+    assert summary_a["name"] == "cfg-a"
+    assert summary_b["name"] == "cfg-b"
+    # 시드 폴더도 이름별로 갈라져 서로 안 겹친다.
+    assert os.path.exists(out_root / "cfg-a-s0" / "summary.json")
+    assert os.path.exists(out_root / "cfg-b-s0" / "summary.json")
