@@ -1,12 +1,13 @@
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from vtd_rl.policy.dataset import DaggerDataset, Shard
 from vtd_rl.policy.encode import OBJ_DIM, OBJ_N, VEC_DIM
 from vtd_rl.rl.buffer import RolloutBuffer
-from vtd_rl.rl.ppo import PPOConfig, dagger_batches, imitation_coef, ppo_losses, update
+from vtd_rl.rl.ppo import PPOConfig, dagger_batches, imitation_coef, imitation_loss, ppo_losses, update
 
 
 def filled_buffer(net, n_steps=4, n_envs=2):
@@ -198,3 +199,27 @@ def test_가치_손실이_가치를_목표로_당긴다(small_ac):
     batch = next(iter(buf.batches(1000, generator=torch.Generator().manual_seed(0))))
     _loss, parts = ppo_losses(net, batch, PPOConfig(entropy_coef=0.0))
     assert parts["value"] < before
+
+
+def test_모방_시그마_모드가_실제로_전달된다(small_ac):
+    net = small_ac()
+    batch = next(iter(toy_dagger(64).batches(32, generator=torch.Generator().manual_seed(0))))
+
+    net.zero_grad()
+    imitation_loss(net, batch, PPOConfig(imitation_sigma="learn"))[0].backward()
+    assert torch.any(net.policy.log_std.grad != 0.0)
+
+    net.zero_grad()
+    imitation_loss(net, batch, PPOConfig(imitation_sigma="detach"))[0].backward()
+    assert net.policy.log_std.grad is None or torch.all(net.policy.log_std.grad == 0.0)
+
+
+def test_모방_시그마_기본값은_learn():
+    assert PPOConfig().imitation_sigma == "learn"
+
+
+def test_모방_시그마에_이상한_값을_주면_거부한다(small_ac):
+    net = small_ac()
+    batch = next(iter(toy_dagger(64).batches(32, generator=torch.Generator().manual_seed(0))))
+    with pytest.raises(ValueError):
+        imitation_loss(net, batch, PPOConfig(imitation_sigma="아무거나"))

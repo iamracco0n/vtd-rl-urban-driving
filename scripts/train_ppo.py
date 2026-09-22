@@ -34,15 +34,18 @@ import torch
 REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, REPO)
 from vtd_rl.env.drive_env import EnvConfig  # noqa: E402
+from vtd_rl.eval.verdict import completed_only, judge, major_total  # noqa: E402
 from vtd_rl.policy import device as pick_device  # noqa: E402
 from vtd_rl.policy.dataset import load_dir  # noqa: E402
-from vtd_rl.policy.evaluate import evaluate_policy  # noqa: E402
+from vtd_rl.policy.evaluate import evaluate_policy, evaluate_teacher, violation_counts  # noqa: E402
 from vtd_rl.policy.train import TrainConfig  # noqa: E402
 from vtd_rl.rl.actor_critic import ActorCritic  # noqa: E402
 from vtd_rl.rl.buffer import RolloutBuffer  # noqa: E402
+from vtd_rl.rl.diagnostics import OutcomeCounter, ReturnTracker, policy_drift, snapshot_policy  # noqa: E402
 from vtd_rl.rl.ppo import PPOConfig, dagger_batches, update  # noqa: E402
 from vtd_rl.rl.vec_env import make_vec_env, vec_obs_to_arrays  # noqa: E402
 from vtd_rl.world.board import load_curriculum  # noqa: E402
+from vtd_rl.world.world import WorldConfig  # noqa: E402
 
 PUBLIC_KEYS = ("goal_rate", "mean_score", "mean_score_raw", "mean_reward")
 
@@ -75,6 +78,17 @@ def _public(ev: dict) -> dict:
 
 def _evaluate_stages(policy, stages, seeds) -> dict:
     return {label: evaluate_policy(policy, boards, seeds=seeds) for label, boards in stages}
+
+
+def _major_totals(evs: dict) -> dict:
+    """완주한 판만 걸러 중대 위반을 센다 — `completed_only` 를 빼면 조기 종료한 판이 중대를
+
+    덜 잡혀 목표 4번(전 항목 중대 위반)이 부당하게 통과한다(2026-09-21 리뷰). 이름 있는
+    함수로 떼어 `evaluate_policy` 서브프로세스 없이 가짜 `ev` 로 단위 테스트한다
+    (`tests/rl/test_train_ppo.py`).
+    """
+    return {label: major_total(violation_counts(completed_only(ev)))
+            for label, ev in evs.items()}
 
 
 def _metric(evs: dict) -> tuple:
@@ -157,8 +171,13 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="이 KL 을 넘으면 그 에폭에서 조기 종료한다 — 낮추면 정책 표류를 더 세게 막는다")
     ap.add_argument("--imitation-half-life", type=int, default=default_cfg.imitation_half_life,
                     help="모방 손실 계수가 절반으로 줄어드는 스텝 수 — 줄이면 PPO 가 더 일찍 선생님을 떠난다")
+    ap.add_argument("--imitation-sigma", choices=("learn", "detach"),
+                    default=default_cfg.imitation_sigma,
+                    help="detach 면 모방 손실이 σ(log_std)를 안 건드린다 — 평균은 그대로 배운다."
+                         " M4a 에서 모방이 σ 를 하한에 붙박아 조향 탐색이 없었다")
     ap.add_argument("--smoke", action="store_true",
-                    help="환경 2개·스텝 4000·롤아웃 64·동기 벡터 환경·평가는 각 단계 코스 A 한 판씩 시드 1개")
+                    help="환경 2개·스텝 4000·롤아웃 64·동기 벡터 환경·평가는 각 단계 코스 A 한 판씩 시드 1개"
+                         "·주기 평가 간격도 좁혀 로그 두 줄 이상을 남긴다")
     return ap
 
 
@@ -170,7 +189,8 @@ def _build_cfg(a) -> PPOConfig:
     `PPOConfig()` 와 완전히 같다 — 기본 동작이 안 바뀐다.
     """
     return dataclasses.replace(PPOConfig(), lr=a.lr, entropy_coef=a.entropy_coef,
-                               target_kl=a.target_kl, imitation_half_life=a.imitation_half_life)
+                               target_kl=a.target_kl, imitation_half_life=a.imitation_half_life,
+                               imitation_sigma=a.imitation_sigma)
 
 
 def _build_optimizer(net, cfg: PPOConfig) -> torch.optim.Optimizer:
@@ -186,13 +206,21 @@ def _build_optimizer(net, cfg: PPOConfig) -> torch.optim.Optimizer:
 def main():
     ap = _build_parser()
     a = ap.parse_args()
-    if a.smoke:
-        a.envs, a.steps, a.rollout = 2, 4000, 64
-        a.eval_seeds, a.final_eval_seeds = 1, 1
+    # 검증을 --smoke 덮어쓰기보다 먼저 한다 — 순서가 반대면 `--smoke --steps 0`·
+    # `--smoke --eval-every 0` 처럼 사용자가 준 잘못된 값이 검증 전에 스모크 기본값으로
+    # 조용히 덮여 에러가 안 난다(2026-09-22 리뷰 지적).
     if a.steps < 1:
         ap.error("--steps 는 1 이상이어야 한다")
     if a.eval_every < 1:
         ap.error("--eval-every 는 1 이상이어야 한다(0 이면 while next_eval<=step 이 안 끊긴다)")
+    if a.smoke:
+        a.envs, a.steps, a.rollout = 2, 4000, 64
+        a.eval_seeds, a.final_eval_seeds = 1, 1
+        # 기본 --eval-every(500000)는 스모크 스텝(4000)보다 훨씬 커서 주기 평가가 학습 끝에
+        # 딱 한 번만 걸린다 — 로그가 한 줄뿐이면 드리프트가 늘어나는지(rows[0] vs rows[-1])를
+        # 볼 수가 없다(2026-09-21 실측: 이 값을 안 좁히면 test_연습_모드가_계측과_판정을_남긴다
+        # 가 자기 자신과 비교하게 되어 못 통과한다). 두 번(중간·끝) 이상 걸리게 절반으로 줄인다.
+        a.eval_every = max(1, a.steps // 2)
 
     log_path = os.path.join(a.out, "log.jsonl")
     if os.path.exists(log_path) or glob.glob(os.path.join(a.out, "ac-*.pt")):
@@ -204,6 +232,14 @@ def main():
     torch.manual_seed(a.seed)
     stages = _stage_boards(a.curricula, a.smoke)
 
+    # 판 하나가 2500~13100 걸음인데 --smoke 의 훈련 예산(기본 4000)은 그보다 작을 수 있어,
+    # 판이 실행 내내 한 번도 안 끝나면 `rollout_return_n` 이 계측 줄마다 0 으로만 찍힌다
+    # (2026-09-21 실측 — 브리프가 놓친 불일치, RED 로 잡았다). 훈련용 벡터 환경만 timeout 을
+    # 크게 당겨 스모크 예산 안에서 반드시 최소 한 판은 끝나게 한다. 평가(`evaluate_policy`·
+    # `evaluate_teacher`)는 이 값을 안 받고 각자 `EnvConfig()` 기본값을 새로 만들어 쓰므로,
+    # 이 축소는 훈련 롤아웃에만 미치고 성적 판정(완주율·점수)에는 영향이 없다.
+    train_env_cfg = EnvConfig(world=WorldConfig(time_limit_scale=0.1)) if a.smoke else EnvConfig()
+
     cfg = _build_cfg(a)
     # 이번 실행에 쓴 하이퍼파라미터 — log.jsonl 각 줄과 요약 JSON 에 그대로 싣는다. 성적표가
     # 여러 실행을 비교할 때 무엇이 달랐는지 산출물만 보고 알 수 있어야 한다(2026-09-21 지시).
@@ -212,8 +248,9 @@ def main():
     try:
         # venv 는 서브프로세스(비동기 벡터 환경)를 띄운다 — `--init` 오타 등으로 그 아래 어떤
         # 준비 코드가 죽어도 finally 가 반드시 타도록 venv 생성부터 이 try 안에 둔다.
-        venv = make_vec_env(a.curricula, a.envs, EnvConfig(), seed=a.seed, asynchronous=not a.smoke)
+        venv = make_vec_env(a.curricula, a.envs, train_env_cfg, seed=a.seed, asynchronous=not a.smoke)
         net = (ActorCritic.from_policy(a.init, device=dev) if a.init else ActorCritic()).to(dev)
+        ref_state = snapshot_policy(net)   # 드리프트 기준점 — `--init` 로드 직후, 갱신 전
         opt = _build_optimizer(net, cfg)
         buf = RolloutBuffer(a.rollout, a.envs, dev)
         gen = torch.Generator().manual_seed(a.seed)
@@ -227,6 +264,12 @@ def main():
         step = 0
         next_eval = a.eval_every
         best_step, best_metric = None, None
+        # 롤아웃 256걸음 × 환경 30개 = 7680 환경-걸음인데 판은 2500~5000걸음이라 롤아웃마다
+        # 2~3판만 끝난다 — 매 롤아웃 reset() 하면 표본 2~3개짜리 평균이 잡음을 신호로 찍는다.
+        # window=30 이면 한 줄이 최근 롤아웃 약 12개 분량의 이동평균이 된다(2026-09-21 설계).
+        # `reset()` 은 부르지 않는다 — 누적은 실행 내내 이어간다.
+        tracker = ReturnTracker(a.envs, window=30)
+        outcomes = OutcomeCounter()   # 평가 구간마다(로그 한 줄마다) 새로 만든다
 
         while step < a.steps:
             buf.reset()
@@ -236,7 +279,7 @@ def main():
                 with torch.no_grad():
                     out = net.act(vec, objs, mask, generator=gen)
                 action = {"control": out["control"].cpu().numpy(), "turn": out["turn"].cpu().numpy()}
-                obs, reward, term, trunc, _info = venv.step(action)
+                obs, reward, term, trunc, info = venv.step(action)
                 # 자동 리셋 더미 행(prev_done)은 reward=제 가치·done=1 로 줘서 GAE 사슬을 끊는다
                 # (`_bootstrap_reward_done` 참고) — `done` 에 `term` 만 그대로 넣으면 truncated
                 # 로 끝난 판 뒤에서 다음 판의 큰 가치가 (γλ)^k 로 새어 든다.
@@ -248,7 +291,14 @@ def main():
                         valid=torch.as_tensor(valid_np, dtype=torch.float32))
                 values_log.append(out["value"].detach())
                 valid_log.append(torch.as_tensor(valid_np, dtype=torch.bool, device=dev))
-                prev_done = np.asarray(term) | np.asarray(trunc)
+                done_mask = np.asarray(term) | np.asarray(trunc)
+                # PPO 가 실제로 최대화하는 확률적 롤아웃 리턴 — 결정적 평가 보상과 달리 한 번도
+                # 로깅된 적이 없었다(M4a 붕괴 원인 불명의 근본 원인, diagnostics.py 모듈 docstring).
+                tracker.add(reward, done_mask)
+                # 종료 사유 집계 — `outcome` 은 "running" 이 아닌 스텝(그 판이 실제로 끝난
+                # 스텝)에만 실린다(OutcomeCounter 가 스스로 거른다).
+                outcomes.add(info)
+                prev_done = done_mask
                 step += a.envs
             with torch.no_grad():
                 vec, objs, mask = (torch.as_tensor(x, device=dev) for x in vec_obs_to_arrays(obs))
@@ -263,33 +313,50 @@ def main():
                 p.requires_grad_(True)
             updates += 1
 
+            # 롤아웃마다 가벼운 진단 줄을 남긴다 — 평가(비싸다)를 기다리면 3M 실행에 약
+            # 6줄뿐이라 M4a 가 무너진 1M~1.5M 구간을 점 2개로만 보게 된다(2026-09-22 리뷰
+            # 지적). 여기 들어가는 값은 전부 이미 계산돼 있던 것이라 비용이 사실상 0이다.
+            # 진단(explained variance)도 `valid` 로 자동 리셋 더미 행을 뺀다 — 학습 배치에
+            # 안 들어가는 행이 진단에도 안 들어가야 한다.
+            values_t, valid_t = torch.stack(values_log), torch.stack(valid_log)
+            ev_var = _explained_variance(buf.returns[valid_t], values_t[valid_t])
+            # `stats["updates"]` 는 이 롤아웃 안에서 도른 미니배치 최적화 걸음 수(ppo.update() 자체
+            # 반환값)다 — 바깥 루프 반복 횟수(우리 `updates` 변수)와 이름이 겹치므로 `iter` 로 적는다.
+            # `tracker.stats()`(rollout_return_mean/_n·rollout_len_mean)와
+            # `policy_drift()`(drift_l2/_rel/_log_std/_rest_rel)는 이름이 서로 겹치지 않고
+            # `stats`(policy/value/entropy/approx_kl/clip_frac/imitation/imitation_coef/updates)
+            # 와도 안 겹친다(M4a 에서 `**stats` 가 바깥 `updates` 를 조용히 덮어쓴 적이 있어
+            # 대조해 확인했다).
+            row = {"step": step, "iter": updates, "elapsed_s": time.perf_counter() - t0,
+                   **stats,
+                   **tracker.stats(),
+                   **policy_drift(net, ref_state),
+                   "explained_variance": ev_var if ev_var == ev_var else None,  # NaN → None(표준 JSON)
+                   "log_std": net.policy.log_std.detach().cpu().tolist(),
+                   "hparams": hparams}
+
             if step >= next_eval or step >= a.steps:
-                # 진단(explained variance)도 `valid` 로 자동 리셋 더미 행을 뺀다 — 학습 배치에
-                # 안 들어가는 행이 진단에는 섞이면 안 된다.
-                values_t, valid_t = torch.stack(values_log), torch.stack(valid_log)
-                ev_var = _explained_variance(buf.returns[valid_t], values_t[valid_t])
                 net.eval()
                 evs = _evaluate_stages(net.policy, stages, tuple(range(a.eval_seeds)))
                 net.train()
-                # `stats["updates"]` 는 이 롤아웃 안에서 도른 미니배치 최적화 걸음 수(ppo.update() 자체
-                # 반환값)다 — 바깥 루프 반복 횟수(우리 `updates` 변수)와 이름이 겹치므로 `iter` 로 적는다.
-                # 단계 결과는 "stages" 하위에 감싼다 — 커리큘럼 파일 이름을 그대로 키로 쓰면(예:
-                # 누가 커리큘럼을 "policy.json" 처럼 지으면) 다른 통계 키와 겹칠 수 있다(`updates`
-                # 이름 충돌로 한 번 데었다).
-                row = {"step": step, "iter": updates, "elapsed_s": time.perf_counter() - t0,
-                       **stats,
-                       "explained_variance": ev_var if ev_var == ev_var else None,  # NaN → None(표준 JSON)
-                       "log_std": net.policy.log_std.detach().cpu().tolist(),
-                       "stages": {label: _public(ev) for label, ev in evs.items()},
-                       "hparams": hparams}
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                # 평가 줄에만 그 구간의 종료 사유 집계를 더 싣는다 — `outcomes.stats()` 는 매
+                # 키가 `outcome_` 로 시작해 위 dict 들과 안 겹친다. 단계 결과는 "stages" 하위에
+                # 감싼다 — 커리큘럼 파일 이름을 그대로 키로 쓰면(예: 누가 커리큘럼을
+                # "policy.json" 처럼 지으면) 다른 통계 키와 겹칠 수 있다(`updates` 이름 충돌로
+                # 한 번 데었다). 평가 줄만 고르려면 `"stages" in row` 로 거른다(Task 6 성적표가
+                # 이 자리로 평가 줄을 구분한다).
+                row.update(outcomes.stats())
+                row["stages"] = {label: _public(ev) for label, ev in evs.items()}
                 net.save(os.path.join(a.out, f"ac-{step}.pt"))
                 metric = _metric(evs)
                 if best_metric is None or metric > best_metric:
                     best_metric, best_step = metric, step
+                outcomes = OutcomeCounter()   # 다음 평가 구간 집계를 새로 시작한다
                 while next_eval <= step:
                     next_eval += a.eval_every
+
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
     finally:
         if venv is not None:
             venv.close()
@@ -319,6 +386,20 @@ def main():
                "best_step": chosen_step,
                "stages": {label: _public(ev) for label, ev in chosen_evs.items()},
                "hparams": hparams}
+
+    # 판정에는 선생님 점수가 필요하다 — train_ppo.py 는 지금까지 선생님을 평가한 적이 없어
+    # 여기서 단계마다 한 번씩 새로 돌린다(선생님은 규칙 스택이라 느리다, 442걸음/s). 단계①②
+    # 판을 합쳐 한 번에 넘기면 판 이름이 같아 "세계 캐시가 다른 판을 준다"로 죽으므로
+    # `stages`(← `load_curriculum` 로 직접 읽은, `#stage` 접미사 없는 판 목록)를 단계별로 따로
+    # 넘긴다 — `--smoke` 에서는 `stages` 자체가 이미 각 단계 코스 A 한 판으로 줄어 있다.
+    teacher_evs = {label: evaluate_teacher(boards, seeds=(0,)) for label, boards in stages}
+    # 미완주 판은 도달 못 한 구간의 위반이 채점표에 없어 중대가 실제보다 적게 잡힌다 —
+    # `completed_only` 로 완주한 판만 걸러야 조기 종료가 이득으로 보이지 않는다.
+    majors = _major_totals(chosen_evs)
+    verdict = judge(chosen_evs, teacher_evs, majors, eval_seeds=a.final_eval_seeds)
+    summary["verdict"] = [{"name": v.name, "ok": v.ok, "line": v.line, "precondition": v.precondition}
+                          for v in verdict]
+
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

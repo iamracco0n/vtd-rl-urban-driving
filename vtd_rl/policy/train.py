@@ -21,13 +21,18 @@ class TrainConfig:
     turn_weight: float = 0.5        # 지시등은 대부분 '끔' 이라 가중치를 낮춘다
     grad_clip: float = 1.0
     seed: int = 0
+    sigma_grad: bool = True         # False 면 NLL 을 log_std.detach() 로 계산한다(M4b: σ 만 푼다)
 
 
 def policy_loss(net, batch, cfg: TrainConfig):
     vec, objs, mask, control, turn = batch
     mean, log_std, logits = net(vec, objs, mask)
-    var = (2.0 * log_std).exp()
-    nll = 0.5 * (((control - mean) ** 2) / var + 2.0 * log_std + LOG_2PI)
+    # σ 를 떼면 평균·지시등에는 기울기가 그대로 흐르고 log_std 에만 안 흐른다. M4a 실측에서
+    # 모방 손실이 log_std[0] 을 하한에 붙박아(기울기 +0.9392) 조향 탐색을 없앴는데, 모방을
+    # 통째로 줄이면(run3) 평균까지 풀려 완주율이 0% 로 무너졌다 — 그래서 σ 만 뗀다.
+    nll_log_std = log_std.detach() if not cfg.sigma_grad else log_std
+    var = (2.0 * nll_log_std).exp()
+    nll = 0.5 * (((control - mean) ** 2) / var + 2.0 * nll_log_std + LOG_2PI)
     control_loss = nll.sum(dim=-1).mean()
     turn_loss = nn.functional.cross_entropy(logits, turn)
     total = control_loss + cfg.turn_weight * turn_loss

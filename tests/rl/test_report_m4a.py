@@ -220,37 +220,327 @@ def test_학습_곡선_표에_평균_보상_열이_있다():
     assert "102.5" in text and "22.5" in text
 
 
-def test_항목_문턱은_시드3개_합계_기준이라_다른_시드수면_판정을_보류한다():
-    """2026-09-22 리뷰(Important #3): `ITEM7_MAJOR_MAX`/`ITEM2_MAJOR_MAX` 는 시드 3개 합계
+def test_항목_문턱_상수가_사라졌다():
+    """Task 6 정본: 항목별 절대 건수 문턱은 `verdict.judge()` 의 총점·중대 합계 판정으로
 
-    전제인데 결합이 없었다 — `--eval-seeds` 를 바꾸면 판정이 조용히 뒤집힌다(단계①은 시드
-    무관 같은 판 6개라 건수가 시드 수에 정확히 비례한다). 시드 3 이 아니면 문턱을 스케일하지
-    않고 보류해야 한다.
+    대체됐다 — 복사본을 남기지 않는다.
+    """
+    src = open(os.path.join(REPO, "scripts", "report_m4a.py"), encoding="utf-8").read()
+    assert "ITEM7_MAJOR_MAX" not in src and "ITEM2_MAJOR_MAX" not in src
+    assert "_item_goal_line" not in src
+    assert "from vtd_rl.eval.verdict import" in src
+
+
+def test_헤드라인은_전제를_빼고_실질_판정만_센다():
+    """`judge()` 가 낸 네 줄 중 완주율·선생님 대비 점수(`precondition=True`)는 3번(출발점 대비
+
+    점수)에 수학적으로 포함된 전제다 — 헤드라인이 그 둘까지 세면 M4a 를 망친 "형식상 N 줄
+    달성" 부풀림을 재현한다. 실질 판정은 항상 2 줄(출발점 대비 점수·전 항목 중대 위반)뿐이다.
     """
     module = _load_report_m4a_module()
 
-    def ev(goal_rate, mean_score, item, major_count):
-        sheet = [{item: "major"} for _ in range(major_count)]
-        return {"goal_rate": goal_rate, "mean_score": mean_score,
-                "episodes": [EpisodeOutcome("X", 0, "goal", 10, 0.0, mean_score, sheet)]}
+    def ev(goal_rate, mean_score):
+        return {"goal_rate": goal_rate, "mean_score": mean_score, "episodes": []}
 
-    teacher = {"goal_rate": 1.0, "mean_score": 99.0, "episodes": []}
-    teacher_ev = {module.STAGE1_LABEL: teacher, module.STAGE2_LABEL: teacher}
+    # 두 실질 판정 줄(출발점 대비 점수·중대 위반)이 모두 통과하도록 M3 문턱을 넉넉히 넘긴다.
+    m4a_ev = {module.STAGE1_LABEL: ev(1.0, 99.6), module.STAGE2_LABEL: ev(1.0, 95.0)}
+    teacher_ev = {module.STAGE1_LABEL: ev(1.0, 99.0), module.STAGE2_LABEL: ev(1.0, 96.0)}
+    major_totals = {module.STAGE1_LABEL: 0, module.STAGE2_LABEL: 0}
+    text = "\n".join(module._goal_lines(m4a_ev, teacher_ev, major_totals, rows=[], best_step=None,
+                                        eval_seeds=3))
+    assert "실질 판정 2 줄 중 **2 줄 달성**" in text
+    assert "전제" in text
+    # 전제 두 줄(완주율·선생님 대비 점수)의 이름이 "전제" 절 아래 있다 — 헤드라인 숫자에는
+    # 안 들어가지만 성적표에서 사라지진 않는다.
+    assert "완주율" in text.split("전제")[1]
+    assert "선생님 대비 점수" in text.split("전제")[1]
 
-    # 시드 3개(문턱이 전제하는 그 조건)일 때는 정상적으로 달성/미달을 낸다.
-    m4a_ev_3 = {module.STAGE1_LABEL: ev(1.0, 95.0, 2, 4),    # 문턱 4 이하 → 달성
-                module.STAGE2_LABEL: ev(1.0, 95.0, 7, 20)}   # 문턱 19 초과 → 미달
-    text3 = "\n".join(module._goal_lines(m4a_ev_3, teacher_ev, rows=[], best_step=None, eval_seeds=3))
-    assert "보류" not in text3
-    assert "목표 4 줄 중 **3 줄 달성**." in text3
-    assert "항목②" in text3 and "달성" in text3
-    assert "항목⑦" in text3 and "미달" in text3
 
-    # 시드 1개로 돌리면 — 같은 절대 건수라도(오히려 더 적은데도) 문턱을 1/3로 스케일하지 않고
-    # 두 줄 다 보류한다.
-    m4a_ev_1 = {module.STAGE1_LABEL: ev(1.0, 95.0, 2, 4), module.STAGE2_LABEL: ev(1.0, 95.0, 7, 1)}
-    text1 = "\n".join(module._goal_lines(m4a_ev_1, teacher_ev, rows=[], best_step=None, eval_seeds=1))
-    assert text1.count("보류") >= 2
-    assert "목표 4 줄 중 **2 줄 달성**(2 줄 보류" in text1
-    assert "달성" not in text1.split("항목②")[1].split("\n")[0]   # 항목② 줄 자체엔 "달성" 이 없다(보류)
-    assert "미달" not in text1.split("항목⑦")[1].split("\n")[0]   # 항목⑦ 줄 자체엔 "미달" 이 없다(보류)
+def test_항목별_표의_중대_합계는_완주_판만_센다():
+    """`completed_only` 를 빼면 조기 종료(timeout)한 판이 도달 못 한 구간의 위반을 시트에 못
+
+    남겨 중대가 실제보다 적게(또는, 이 예시처럼 완주 못한 판에 중대가 더 있으면 많게) 잡힌다.
+    `major_total(violation_counts(completed_only(ev)))` 순서를 지켜야 한다(Task 6 정본).
+    """
+    module = _load_report_m4a_module()
+    from vtd_rl.eval.verdict import completed_only, major_total
+
+    # 완주 판 1개(중대 1건) + 미완주 판 1개(도달한 구간에 중대 2건 더) — completed_only 를
+    # 빼면 합계가 1이 아니라 3이 된다.
+    episodes = [
+        EpisodeOutcome("A", 0, "goal", 10, 0.0, 90.0, [{2: "major"}]),
+        EpisodeOutcome("A", 1, "timeout", 5, 0.0, 0.0, [{2: "major"}, {2: "major"}]),
+    ]
+    ev = {"episodes": episodes}
+    assert major_total(violation_counts(completed_only(ev))) == 1   # 완주 판만 셌을 때의 참값
+
+    m3_ev = {module.STAGE1_LABEL: ev, module.STAGE2_LABEL: ev}
+    m4a_ev = {module.STAGE1_LABEL: ev, module.STAGE2_LABEL: ev}
+    teacher_ev = {module.STAGE1_LABEL: ev, module.STAGE2_LABEL: ev}
+    text = "\n".join(module._violation_table_lines([module.STAGE1_LABEL, module.STAGE2_LABEL],
+                                                    m3_ev, m4a_ev, teacher_ev))
+    assert "중대 합계" in text
+    assert "| **중대 합계(완주 판 기준)** | — | 1 | — | 1 | — | 1 |" in text
+    assert "| **중대 합계(완주 판 기준)** | — | 3 | — | 3 | — | 3 |" not in text
+
+
+@pytest.mark.slow
+def test_성적표가_중대_합계와_시드_편차를_담는다(tmp_path):
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    root = str(tmp_path / "sweep")
+    sw = subprocess.run([os.path.join(REPO, ".venv", "bin", "python"),
+                         os.path.join(REPO, "scripts", "sweep_ppo.py"),
+                         "--out-root", root, "--name", "smoke", "--seeds", "0", "1",
+                         "--", "--smoke"],
+                        capture_output=True, text=True, env=env, cwd=REPO, timeout=3600)
+    assert sw.returncode == 0, sw.stderr[-3000:]
+
+    report = str(tmp_path / "m4b.md")
+    made = subprocess.run([os.path.join(REPO, ".venv", "bin", "python"),
+                           os.path.join(REPO, "scripts", "report_m4a.py"),
+                           "--run", os.path.join(root, "smoke-s0"),
+                           # sweep_ppo.py 가 `<out-root>/sweep.json`(고정 이름) 대신
+                           # `<out-root>/<name>-sweep.json` 을 쓰게 바뀌었다(커밋 af1d194,
+                           # 같은 --out-root 에 여러 설정을 돌리면 서로 덮어쓰던 문제) — 여기
+                           # `--name` 이 "smoke" 이므로 "smoke-sweep.json" 이다.
+                           "--sweep", os.path.join(root, "smoke-sweep.json"),
+                           "--out", report, "--skip-eval"],
+                          capture_output=True, text=True, env=env, cwd=REPO, timeout=900)
+    assert made.returncode == 0, made.stderr[-3000:]
+    text = open(report, encoding="utf-8").read()
+    for needed in ("중대 합계", "시드 편차", "rollout_return_mean", "drift_rel"):
+        assert needed in text, needed
+
+
+def test_진단_곡선_표본_간격_공식과_None_렌더링():
+    """리뷰 지적: `_diagnostic_table` 의 유일한 커버리지가 헤더 문자열 존재 확인뿐이었다 —
+
+    `rows[::step]` 을 `rows[:step]` 으로 바꿔도, `None` 을 `0` 으로 위장해도 안 잡혔다. 값
+    수준으로 직접 잠근다: 40줄을 넣으면(`DIAGNOSTIC_SAMPLE_TARGET=20`) 간격 2, 표본 20줄이
+    나와야 하고, 제목에 그 원본 줄 수·간격이 실제로 찍혀야 하고, `rollout_return_mean=None`
+    인 첫 줄은 `0` 이 아니라 `—` 로 나와야 한다.
+    """
+    module = _load_report_m4a_module()
+    n = 40
+    rows = [{"step": i,
+             "rollout_return_mean": None if i < 5 else float(i),
+             "rollout_return_n": 0 if i < 5 else i,
+             "drift_log_std": 0.001 * i, "drift_rel": 0.01 * i,
+             "entropy": 1.9, "approx_kl": 0.0, "imitation_coef": 1.0}
+            for i in range(n)]
+    expected_step = max(1, n // module.DIAGNOSTIC_SAMPLE_TARGET)
+    expected_sampled = len(rows[::expected_step])
+    assert expected_step == 2 and expected_sampled == 20   # 이 테스트가 실제로 뭘 기대하는지 명시
+
+    lines = module._diagnostic_table(rows)
+    text = "\n".join(lines)
+    # 제목에 원본 줄 수·표본 간격·표본 수가 실제로 찍힌다(무엇을 보고 있는지 알아야 한다).
+    assert f"{n}줄 중 {expected_step}줄 간격 표본 — {expected_sampled}줄" in text
+
+    data_rows = [ln for ln in lines if ln.startswith("| ") and "step |" not in ln
+                and not ln.startswith("|---")]
+    assert len(data_rows) == expected_sampled   # rows[::step] 이 맞다면(rows[:step] 이면 2가 된다)
+
+    # 표본의 첫 행은 step=0(rollout_return_mean=None) → "—" 다. "0" 으로 위장하면 잡힌다.
+    assert data_rows[0] == "| 0 | — | 0 | 0.000 | 0.000 | 1.9000 | 0.0000 | 1.000 |"
+    # 표본에 None 이 아닌 값도 섞여 있고 실제 숫자로 나온다(항상 "—" 로 뭉개지 않는다).
+    # step=2 라 표본은 짝수 인덱스(0, 2, ..., 38)뿐 — 마지막 표본은 38이다.
+    assert any("38.0" in row for row in data_rows)
+
+
+def _write_sweep_json(path: str, sw: dict):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(sw, f, ensure_ascii=False)
+
+
+def test_시드_편차_목표달성_카운트는_실질_판정만_전부_통과한_시드를_센다(tmp_path):
+    """리뷰 지적: `goal_hits` 의 `all(...)` 을 `any(...)` 로 바꾸거나 `precondition` 필터를
+
+    뒤집어도 헤더 문자열만 보는 테스트는 못 잡는다 — 합성 sweep.json 으로 직접 값을 잠근다.
+
+    시드 0: 전제 두 줄은 실패(ok=False)지만 실질 판정 두 줄은 전부 통과 → **세야 한다**
+           (전제가 실패해도 실질 판정만 본다는 것의 증거).
+    시드 1: 실질 판정 중 하나가 실패 → **안 세야 한다**.
+    시드 2: `verdict` 자체가 빈 리스트(학습 실패 등 극단 케이스) → 크래시 없이 **안 세야 한다**.
+    """
+    module = _load_report_m4a_module()
+
+    def real(ok):
+        return {"name": "실질", "ok": ok, "line": "실질 판정 줄", "precondition": False}
+
+    def precondition(ok):
+        return {"name": "전제", "ok": ok, "line": "전제 줄", "precondition": True}
+
+    sweep = {
+        "name": "review", "seeds": [0, 1, 2], "complete": True,
+        "runs": [
+            {"seed": 0, "summary": {"verdict": [precondition(False), precondition(False),
+                                                real(True), real(True)]}},
+            {"seed": 1, "summary": {"verdict": [precondition(True), precondition(True),
+                                                real(True), real(False)]}},
+            {"seed": 2, "summary": {"verdict": []}},
+        ],
+        "spread": {},
+    }
+    path = str(tmp_path / "sweep.json")
+    _write_sweep_json(path, sweep)
+
+    text = "\n".join(module._sweep_lines([path]))
+    assert "3 개 시드 중 1 개" in text   # 시드 0만 세야 한다 — 1이 아니라 2나 3이면 잡힌다
+
+
+def test_시드_편차_complete_false_는_절_맨_위에_드러난다(tmp_path):
+    """`complete: false` 가 조용히 묻히면 부분 결과가 완성본처럼 보인다 — 절 맨 위에 있어야
+
+    한다(리스트 순서를 직접 확인, 텍스트 존재만으론 위치가 안 잠긴다).
+    """
+    module = _load_report_m4a_module()
+    sweep = {"name": "partial", "seeds": [0, 1], "complete": False,
+             "runs": [{"seed": 0, "summary": {"verdict": []}}], "spread": {}}
+    path = str(tmp_path / "sweep_partial.json")
+    _write_sweep_json(path, sweep)
+
+    lines = module._sweep_lines([path])
+    complete_idx = next(i for i, ln in enumerate(lines) if "complete: false" in ln)
+    count_idx = next(i for i, ln in enumerate(lines) if "실제로 끝난" in ln)
+    assert complete_idx < count_idx
+
+
+def test_제목은_기본값을_유지하고_title_인자로_바꿀_수_있다(tmp_path):
+    """리뷰 Minor: 제목이 `# M4a 성적표 — PPO` 로 고정돼 있었다 — M4b 성적표를 이 스크립트로
+
+    만들면 문서 제목이 "M4a" 로 남아 헷갈린다. `--title` 을 새로 받되 기본값은 지금 동작(정확히
+    "M4a 성적표 — PPO")과 같아야 한다.
+    """
+    run_dir = str(tmp_path / "run")
+    _write_minimal_log(run_dir)
+
+    default_out = str(tmp_path / "default.md")
+    made1 = _report(["--run", run_dir, "--out", default_out, "--skip-eval"])
+    assert made1.returncode == 0, made1.stderr[-3000:]
+    assert "# M4a 성적표 — PPO" in open(default_out, encoding="utf-8").read()
+
+    custom_out = str(tmp_path / "custom.md")
+    made2 = _report(["--run", run_dir, "--out", custom_out, "--skip-eval",
+                     "--title", "M4b 성적표 — PPO"])
+    assert made2.returncode == 0, made2.stderr[-3000:]
+    text2 = open(custom_out, encoding="utf-8").read()
+    assert "# M4b 성적표 — PPO" in text2
+    assert "# M4a 성적표 — PPO" not in text2
+
+
+def test_hparam_diff는_imitation_sigma_변경을_잡는다(tmp_path):
+    """★Critical(2026-09-22 최종 리뷰): `CLI_HPARAM_KEYS` 에 `imitation_sigma` 가 없어서
+
+    이 마일스톤이 실제로 시험한 처치(`--imitation-sigma detach`)가 "(기본값)" 으로 찍혔다 —
+    실제 실험(base vs sigma-detach)에서 항목⑦ 이 68 vs 39 로 갈렸는데 하이퍼파라미터 열은
+    "같다" 고 적혀 읽는 사람이 시드 잡음으로 오독했다. 두 실행의 실제 `hparams` 모양으로
+    `_hparam_diff` 가 그 키를 집어내는지, 그리고 CLI 왕복에서도 실제로 보이는지 잠근다.
+    """
+    module = _load_report_m4a_module()
+    base_hparams = {"lr": 3e-4, "entropy_coef": 0.005, "target_kl": 0.03,
+                    "imitation_half_life": 2_000_000, "imitation_sigma": "learn"}
+    detach_hparams = dict(base_hparams, imitation_sigma="detach")
+    assert module._hparam_diff(base_hparams) == "(기본값)"
+    assert module._hparam_diff(detach_hparams) == "imitation_sigma=detach"
+
+    run_base, run_detach = str(tmp_path / "base"), str(tmp_path / "detach")
+    _write_minimal_log(run_base, base_hparams)
+    _write_minimal_log(run_detach, detach_hparams)
+    report = str(tmp_path / "cmp.md")
+    made = _report(["--run", run_base, "--compare", run_detach, "--out", report, "--skip-eval"])
+    assert made.returncode == 0, made.stderr[-3000:]
+    text = open(report, encoding="utf-8").read()
+    assert "imitation_sigma=detach" in text
+    assert "(기본값)" in text   # run_base 는 (imitation_sigma 포함해) 바뀐 게 없다
+
+
+def test_best_step_caveat는_전제_줄만으로_발화하지_않는다():
+    """I9(2026-09-22 최종 리뷰): `any(v.ok for v in verdicts)` 로 걸면 precondition=True 인
+
+    두 줄(완주율·선생님 대비 점수)만 통과해도 caveat 가 뜬다 — 실제 성적표에 "실질 판정 2 줄
+    중 0 줄 달성" 바로 밑에 "위 **달성**이 PPO 자체의 성과라기보다…" 가 찍히는 자기모순이
+    나왔다. `real`(precondition=False) 만 보고 판단해야 caveat 가 안 뜬다.
+    """
+    module = _load_report_m4a_module()
+
+    def ev(goal_rate, mean_score):
+        return {"goal_rate": goal_rate, "mean_score": mean_score, "episodes": []}
+
+    # 전제 두 줄(완주율·선생님 대비 점수)은 통과, 실질 두 줄(출발점 대비 점수·중대 위반)은 실패.
+    m4a_ev = {module.STAGE1_LABEL: ev(1.0, 50.0), module.STAGE2_LABEL: ev(1.0, 50.0)}
+    teacher_ev = {module.STAGE1_LABEL: ev(1.0, 50.0), module.STAGE2_LABEL: ev(1.0, 50.0)}
+    major_totals = {module.STAGE1_LABEL: 20, module.STAGE2_LABEL: 100}   # M3 문턱(15, 79) 초과
+
+    # best_step 이 절반 미만이라 caveat 자체는(호출되면) 항상 비지 않은 문자열을 낸다.
+    rows = [{"step": 100_000, "imitation_coef": 0.8}, {"step": 1_000_000, "imitation_coef": 0.5}]
+    text = "\n".join(module._goal_lines(m4a_ev, teacher_ev, major_totals, rows, best_step=100_000,
+                                        eval_seeds=3))
+    assert "실질 판정 2 줄 중 **0 줄 달성**" in text
+    assert "선정된 체크포인트" not in text   # caveat 문구가 새어 나오면 안 된다(자기모순)
+
+
+def test_로_미루는_것_절이_생성기에_없다():
+    """I8(2026-09-22 최종 리뷰): 하드코딩된 '## M4b 로 미루는 것' 절이, 노트가 쓴
+
+    'M4c 가 먼저 할 일' 과 정면으로 부딪힌 적이 있다(M4b 성적표가 "커리큘럼 ③④⑤ 는 M4b 로
+    미룬다" 고 말했다) — 마일스톤마다 달라지는 내용은 생성기가 아니라 `--notes` 가 말해야
+    한다.
+    """
+    src = open(os.path.join(REPO, "scripts", "report_m4a.py"), encoding="utf-8").read()
+    assert "로 미루는 것" not in src
+
+
+def test_student_label_인자가_비교_표와_항목별_표에_반영된다():
+    """I8(2026-09-22 최종 리뷰): 비교 표 제목·헤더와 항목별 표 헤더가 `"M4a 학생"`/
+
+    `"M4a minor"`/`"M4a major"` 로 하드코딩돼 있었다. `--student-label`(기본 "학생") 을 받아
+    호출부가 정하게 한다.
+    """
+    module = _load_report_m4a_module()
+
+    def ev(goal_rate, mean_score, episodes=None):
+        return {"goal_rate": goal_rate, "mean_score": mean_score, "episodes": episodes or []}
+
+    labels = [module.STAGE1_LABEL, module.STAGE2_LABEL]
+    m3_ev = {l: ev(1.0, 90.0) for l in labels}
+    m4a_ev = {l: ev(1.0, 80.0) for l in labels}
+    teacher_ev = {l: ev(1.0, 95.0) for l in labels}
+
+    text_default = "\n".join(module._comparison_lines(labels, m3_ev, m4a_ev, teacher_ev, eval_seeds=3))
+    assert "M4a 학생" not in text_default
+    assert "학생" in text_default   # 기본값 "학생" 은 그대로 나온다
+
+    text_custom = "\n".join(module._comparison_lines(labels, m3_ev, m4a_ev, teacher_ev, eval_seeds=3,
+                                                      student_label="M4b 학생"))
+    assert "M4b 학생" in text_custom
+
+    viol_default = "\n".join(module._violation_table_lines(labels, m3_ev, m4a_ev, teacher_ev))
+    assert "M4a minor" not in viol_default and "M4a major" not in viol_default
+
+    viol_custom = "\n".join(module._violation_table_lines(labels, m3_ev, m4a_ev, teacher_ev,
+                                                           student_label="M4b 학생"))
+    assert "M4b 학생 minor" in viol_custom and "M4b 학생 major" in viol_custom
+
+
+def test_summary_table도_completed_only로_중대를_센다():
+    """I12(2026-09-22 최종 리뷰): `_summary_table` 만 `completed_only` 를 안 써서 같은
+
+    성적표 안에서 같은 항목이 두 숫자로 찍힐 수 있었다(항목별 표는 `_violation_table_lines`
+    에서 이미 `completed_only` 를 쓴다). 완주 판 1개(중대 1건) + 미완주 판 1개(도달한 구간에
+    중대 2건 더)를 넣어 completed_only 를 쓰면 1, 안 쓰면 3이 나오는 걸로 구분한다.
+    """
+    module = _load_report_m4a_module()
+    episodes = [
+        EpisodeOutcome("A", 0, "goal", 10, 0.0, 90.0, [{7: "major"}]),
+        EpisodeOutcome("A", 1, "timeout", 5, 0.0, 0.0, [{7: "major"}, {7: "major"}]),
+    ]
+    ev = {"goal_rate": 0.5, "mean_score": 45.0, "episodes": episodes}
+    live = {module.STAGE1_LABEL: ev, module.STAGE2_LABEL: ev}
+
+    lines = module._summary_table(["/tmp/x"], {"/tmp/x": []}, {"/tmp/x": None},
+                                  {"/tmp/x": live}, skip_eval=False)
+    text = "\n".join(lines)
+    assert "| 1 | 0 |" in text     # completed_only 를 쓰면 항목⑦ 1건(완주 판만), 항목② 0건
+    assert "| 3 | 0 |" not in text   # completed_only 를 안 쓰면 3건(전부 합산)이 됐을 것

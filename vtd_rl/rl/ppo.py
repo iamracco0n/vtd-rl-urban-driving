@@ -3,6 +3,7 @@
 모방 손실은 M3 라벨(선생님)에 대한 로그가능도다. 처음에는 강하게 잡아 두고 반감기로 줄인다 —
 PPO 단계에서는 선생님을 다시 돌리지 않고 모아 둔 데이터만 쓴다(스펙 §6.3).
 """
+import dataclasses
 from dataclasses import dataclass
 
 import torch
@@ -24,6 +25,7 @@ class PPOConfig:
     lam: float = 0.95
     imitation_coef0: float = 1.0
     imitation_half_life: int = 2_000_000
+    imitation_sigma: str = "learn"   # "learn" | "detach" — detach 면 모방이 σ 를 안 건드린다
     target_kl: float = 0.03
     # 가치 클리핑 폭은 정책 비율 클리핑(clip)과 별개다 — 이 환경의 리턴은 O(100)
     # (progress 100 · goal 50 · collision -50, 보상 정규화 없음, 스펙 §5)인데 비율용 0.2 를
@@ -33,6 +35,9 @@ class PPOConfig:
 
 # 모방 손실은 매 미니배치 M3 학습 설정을 그대로 쓴다 — 새로 만들 이유가 없어 모듈 상수로 뺀다.
 _IMITATION_TRAIN_CFG = TrainConfig()
+# M4b: 평균은 선생님에 묶어 두고 σ 만 푸는 짝 — sigma_grad 만 다르다.
+_IMITATION_TRAIN_CFG_DETACH = dataclasses.replace(_IMITATION_TRAIN_CFG, sigma_grad=False)
+_IMITATION_CFGS = {"learn": _IMITATION_TRAIN_CFG, "detach": _IMITATION_TRAIN_CFG_DETACH}
 
 
 def imitation_coef(step: int, cfg: PPOConfig) -> float:
@@ -67,9 +72,14 @@ def imitation_loss(net, dagger_batch, cfg: PPOConfig):
 
     `net` 은 `ActorCritic`(가치 머리 포함)이지만, `policy_loss` 는 `DrivePolicy` 를
     직접 호출하므로(`net(vec, objs, mask) -> mean, log_std, logits`) 반드시 `net.policy` 를
-    넘긴다.
+    넘긴다. `cfg.imitation_sigma` 가 `"detach"` 면 σ 에는 기울기를 안 보낸다.
     """
-    return policy_loss(net.policy, dagger_batch, _IMITATION_TRAIN_CFG)
+    try:
+        train_cfg = _IMITATION_CFGS[cfg.imitation_sigma]
+    except KeyError:
+        raise ValueError(f"imitation_sigma 는 {sorted(_IMITATION_CFGS)} 중 하나여야 한다:"
+                         f" {cfg.imitation_sigma!r}")
+    return policy_loss(net.policy, dagger_batch, train_cfg)
 
 
 def dagger_batches(dataset, batch_size: int, generator=None, device=None):
