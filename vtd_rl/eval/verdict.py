@@ -22,6 +22,14 @@ Task 1 첫 리뷰에서 두 가지가 더 드러났다.
 2. 미완주 판은 도달하지 못한 구간의 위반이 채점표에 아예 없어 중대 위반이 실제보다 적게
    잡힌다. 점수는 미완주를 0점으로 **벌하는데** 위반 집계는 반대로 **상**을 주는 셈이다.
    그래서 중대 위반은 완주한 판만(`completed_only`) 골라 센 뒤 합산한다.
+
+이 두 번째 수정 자체가 새 구멍을 냈다(2026-09-22, 전체 브랜치 리뷰). `completed_only` 는
+"3번(출발점 대비 점수)이 완주를 사실상 강제하니 안전하다" 고 판단했는데 틀렸다 — 4번은 3번과
+**독립으로** 인쇄되고 판정된다. `sigma-detach-ent-s2` 실행(9회 중 가장 붕괴, 점수 32.4, 완주율
+33%)이 실측으로 증명했다: 완주 판이 18개 중 6개뿐이라 중대 절대 합계(9, 18)가 M3 의 18판 기준
+합계(15, 79)보다 작아져 4번이 "달성" 으로 나왔다 — **판을 덜 끝낼수록 통과하는**, M4a 를 망친
+것과 같은 종류의 풍선 누르기다. 그래서 완주 판 수가 M3 기준(`M3_COMPLETED`, 18판)과 다르면
+4번을 **보류**한다 — 절대 합계를 다른 분모로 비교하지 않는다.
 """
 from dataclasses import dataclass
 
@@ -42,6 +50,13 @@ M3_MAJOR_TOTAL = {"stage1": 15, "stage2": 79}
 
 # M3 기준값이 시드 3개 합계라, 시드 수가 다르면 3·4번은 비교 자체가 성립하지 않는다.
 REQUIRED_EVAL_SEEDS = 3
+
+# M3_MAJOR_TOTAL 은 완주한 판 18개(단계별 시드 3개 x 보드 6개, M3 학생이 두 단계 모두
+# 100% 완주해 총 판 수와 완주 판 수가 같다) 를 합산한 값이다. `completed_only` 는 조기
+# 종료한 판을 걸러내므로, 지금 평가의 완주 판 수가 18이 아니면 절대 합계 자체가 다른
+# 분모에서 나온 것이라 그대로 비교할 수 없다 — 완주 판이 적을수록 위반도 적게 잡혀
+# "덜 끝낼수록 통과" 하는 풍선 누르기가 된다(2026-09-22 실측 `sigma-detach-ent-s2`).
+M3_COMPLETED = {"stage1": 18, "stage2": 18}
 
 
 @dataclass(frozen=True)
@@ -80,13 +95,20 @@ def _label(ok: bool, held: bool) -> str:
     return "달성" if ok else "미달"
 
 
+def _completed_count(ev: dict):
+    """`ev["episodes"]` 중 완주(outcome == "goal") 개수. 정보가 없으면 None."""
+    episodes = ev.get("episodes")
+    if not episodes:
+        return None
+    return sum(1 for e in episodes if e.outcome == "goal")
+
+
 def _completion_note(ev: dict):
     """`ev["episodes"]` 에서 완주 수/전체 수 "N/M" 문자열을 낸다. 정보가 없으면 None."""
     episodes = ev.get("episodes")
     if not episodes:
         return None
-    completed = sum(1 for e in episodes if e.outcome == "goal")
-    return f"{completed}/{len(episodes)}"
+    return f"{_completed_count(ev)}/{len(episodes)}"
 
 
 def judge(student: dict, teacher: dict, major_totals: dict, eval_seeds: int) -> list[GoalVerdict]:
@@ -113,6 +135,20 @@ def judge(student: dict, teacher: dict, major_totals: dict, eval_seeds: int) -> 
     completion_suffix = (f" (완주 판 기준 — 단계① {n1}, 단계② {n2})"
                          if n1 is not None and n2 is not None else "")
 
+    # 4번만의 추가 보류 사유: 완주 판 수가 M3 기준(18판)과 다르면 절대 합계를 비교할 수
+    # 없다(위 모듈 docstring 참고). episodes 정보가 없으면(합성 테스트 등) 판단을 보류하지
+    # 않는다 — 알 수 없는 것과 다른 것은 다르다.
+    c1, c2 = _completed_count(s1), _completed_count(s2)
+    denom_parts = []
+    if c1 is not None and c1 != M3_COMPLETED["stage1"]:
+        denom_parts.append(f"단계① 완주 {c1}/{M3_COMPLETED['stage1']}판")
+    if c2 is not None and c2 != M3_COMPLETED["stage2"]:
+        denom_parts.append(f"단계② 완주 {c2}/{M3_COMPLETED['stage2']}판")
+    denom_mismatch = bool(denom_parts)
+    denom_hold = (f" (보류 — {', '.join(denom_parts)}이라 M3 기준(18판) 합계와 절대건수로"
+                  " 비교할 수 없다)") if denom_mismatch else ""
+    held4 = held or denom_mismatch
+
     return [
         GoalVerdict("완주율", goal_ok,
                     f"완주율 단계①② 모두 ≥{_pct(GOAL_RATE_MIN)} → **{'달성' if goal_ok else '미달'}**"
@@ -130,11 +166,12 @@ def judge(student: dict, teacher: dict, major_totals: dict, eval_seeds: int) -> 
                     f" {s1['mean_score']:.1f} vs M3 {M3_SCORE['stage1']:.1f}, 단계②"
                     f" {s2['mean_score']:.1f} vs M3 {M3_SCORE['stage2']:.1f})"
                     + (hold if held else "")),
-        GoalVerdict("전 항목 중대 위반", majors_ok and not held,
+        GoalVerdict("전 항목 중대 위반", majors_ok and not held4,
                     f"중대 위반 **합계**가 M3 학생보다 늘지 않을 것 →"
-                    f" **{_label(majors_ok, held)}** (실측: 단계①"
+                    f" **{_label(majors_ok, held4)}** (실측: 단계①"
                     f" {major_totals['stage1']} vs M3 {M3_MAJOR_TOTAL['stage1']}, 단계②"
                     f" {major_totals['stage2']} vs M3 {M3_MAJOR_TOTAL['stage2']})"
                     + completion_suffix
-                    + (hold if held else "")),
+                    + (hold if held else "")
+                    + denom_hold),
     ]

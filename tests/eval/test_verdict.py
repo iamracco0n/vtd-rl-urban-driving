@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from vtd_rl.eval.verdict import (GOAL_RATE_MIN, M3_MAJOR_TOTAL, M3_SCORE,
-                                 M3_SCORE_MARGIN, TEACHER_SCORE_SLACK,
+from vtd_rl.eval.verdict import (GOAL_RATE_MIN, M3_COMPLETED, M3_MAJOR_TOTAL,
+                                 M3_SCORE, M3_SCORE_MARGIN, TEACHER_SCORE_SLACK,
                                  completed_only, judge, major_total)
 from vtd_rl.policy.evaluate import violation_counts
 
@@ -156,6 +156,35 @@ def test_네번째_줄에_완주_분모를_적는다():
     v = judge(s, TEACHER, {"stage1": 10, "stage2": 50}, eval_seeds=3)
     assert "5/6" in v[3].line
     assert "4/6" in v[3].line
+
+
+# --- 리뷰(2026-09-22, 전체 브랜치): completed_only 가 4번의 분모를 M3 기준(18판)과 다르게
+# --- 만들면 "덜 끝낼수록 통과" 해 버린다. 완주 판 수가 M3_COMPLETED 와 다르면 4번을 보류한다.
+
+
+def test_sigma_detach_ent_s2_는_분모가_다르면_네번째가_달성이_아니다():
+    """실측(`sigma-detach-ent-s2`, 9회 중 가장 붕괴): 완주 6/18 판인데 M3 중대합계(15,79)는
+    18판 기준이라 절대건수를 그대로 비교하면 안 된다. 판을 덜 끝낼수록 위반도 적게 잡혀
+    "달성" 이 나와 버리는 것이 이 회귀의 존재 이유다 — 이 리뷰 라운드의 핵심 계약."""
+    eps1 = [SimpleNamespace(outcome="goal")] * 6 + [SimpleNamespace(outcome="crash")] * 12
+    eps2 = [SimpleNamespace(outcome="goal")] * 6 + [SimpleNamespace(outcome="timeout")] * 12
+    s = {"stage1": {"goal_rate": 6 / 18, "mean_score": 32.4, "episodes": eps1},
+         "stage2": {"goal_rate": 6 / 18, "mean_score": 31.8, "episodes": eps2}}
+    v = judge(s, TEACHER, {"stage1": 9, "stage2": 18}, eval_seeds=3)
+    assert v[3].ok is False
+    assert "달성" not in v[3].line
+    assert "보류" in v[3].line
+
+
+def test_완주_18_18이면_네번째가_평소처럼_판정된다():
+    """분모 검사를 더했다고 정상 케이스(기존 테스트들)가 깨지면 안 된다."""
+    eps1 = [SimpleNamespace(outcome="goal")] * M3_COMPLETED["stage1"]
+    eps2 = [SimpleNamespace(outcome="goal")] * M3_COMPLETED["stage2"]
+    s = {"stage1": {"goal_rate": 1.0, "mean_score": 99.1, "episodes": eps1},
+         "stage2": {"goal_rate": 1.0, "mean_score": 99.1, "episodes": eps2}}
+    v = judge(s, TEACHER, {"stage1": 10, "stage2": 50}, eval_seeds=3)
+    assert v[3].ok is True
+    assert "보류" not in v[3].line
 
 
 # --- 리뷰(I1): major_total 은 fail-open 이면 안 된다(실제 violation_counts 와 결합) -----
