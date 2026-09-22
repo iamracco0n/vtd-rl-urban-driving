@@ -53,9 +53,12 @@ DIAGNOSTIC_SAMPLE_TARGET = 20
 # `train_ppo.py` 의 `hparams`(=`vars(argparse 결과)`) 에는 `--envs`·`--seed`·`--out` 처럼 실행마다
 # 자연히 다른 값도 섞여 있다. `--envs` 는 기본값 자체가 `os.cpu_count() - 2` 라 이 스크립트를 돌리는
 # 머신에서 다시 계산하면 실행 당시(OMEN)와 달라 보여 "바뀐 값"으로 잘못 잡힌다. 그래서 비교는
-# `PPOConfig` 필드와 이름이 같은, 실제로 CLI 로 연 네 하이퍼파라미터로만 좁힌다(train_ppo.py 의
-# `--entropy-coef`/`--lr`/`--target-kl`/`--imitation-half-life` 주석이 "이 네 개" 라 부르는 바로 그것).
-CLI_HPARAM_KEYS = ("lr", "entropy_coef", "target_kl", "imitation_half_life")
+# `PPOConfig` 필드와 이름이 같은, 실제로 CLI 로 연 하이퍼파라미터로만 좁힌다.
+# `imitation_sigma`(`--imitation-sigma`) 는 M4b 본 실험이 실제로 시험한 처치(learn vs detach)
+# 인데 여기 빠져 있었다 — 그래서 `sigma-detach-s0` 실행이 "(기본값)" 으로 찍혀, 하이퍼파라미터가
+# "같다"고 적힌 두 행이 항목⑦ 68 vs 39 로 갈린 걸 읽는 사람이 시드 잡음으로 오독했다
+# (2026-09-22 최종 리뷰 Critical). 반드시 여기 추가해야 한다.
+CLI_HPARAM_KEYS = ("lr", "entropy_coef", "target_kl", "imitation_half_life", "imitation_sigma")
 
 
 def _circled(n: int) -> str:
@@ -265,6 +268,10 @@ def _summary_table(run_dirs: list, rows_by_run: dict, best_steps: dict, extra_ev
     `stages`(완주율·점수)는 평가 줄에만 있어 `_last_eval_row` 로 찾는다. `log_std`·
     `explained_variance`·`hparams` 는 롤아웃 줄에도 있으므로(값싼 진단은 매 줄에 실린다)
     절대적으로 마지막 줄(`rows[-1]`)에서 읽는 게 더 최신값이다 — 둘을 갈라 쓴다.
+
+    항목⑦·② 중대 건수는 `completed_only` 를 거쳐야 한다(I12, 2026-09-22 최종 리뷰) — 안 그러면
+    이 표만 조기 종료 판까지 섞어 세어, 같은 성적표 안의 항목별 표(`_violation_table_lines`,
+    이미 `completed_only` 를 쓴다)와 같은 항목이 다른 숫자로 찍힐 수 있다.
     """
     header = ["실행", "바뀐 하이퍼파라미터", "best_step", "단계① 완주율", "단계① 점수",
               "단계② 완주율", "단계② 점수", "항목⑦ 중대", "항목② 중대", "log_std", "EV"]
@@ -284,9 +291,11 @@ def _summary_table(run_dirs: list, rows_by_run: dict, best_steps: dict, extra_ev
         if live:
             stage_vals.update(live)
             if STAGE2_LABEL in live:
-                item7 = violation_counts(live[STAGE2_LABEL]).get(7, {"major": 0})["major"]
+                item7 = violation_counts(completed_only(live[STAGE2_LABEL])).get(
+                    7, {"major": 0})["major"]
             if STAGE1_LABEL in live:
-                item2 = violation_counts(live[STAGE1_LABEL]).get(2, {"major": 0})["major"]
+                item2 = violation_counts(completed_only(live[STAGE1_LABEL])).get(
+                    2, {"major": 0})["major"]
         s1, s2 = stage_vals.get(STAGE1_LABEL), stage_vals.get(STAGE2_LABEL)
         log_std = ", ".join(f"{x:.3f}" for x in raw_last["log_std"]) if raw_last else "—"
         ev_val = (f"{raw_last['explained_variance']:.3f}"
@@ -301,9 +310,15 @@ def _summary_table(run_dirs: list, rows_by_run: dict, best_steps: dict, extra_ev
     return lines
 
 
-def _comparison_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teacher_ev: dict, eval_seeds: int) -> list:
-    lines = ["", "## 비교 — M3 학생 · M4a 학생 · 선생님", "",
-             "| 단계 | 지표 | M3 학생 | M4a 학생 | 선생님 |", "|---|---|---:|---:|---:|"]
+def _comparison_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teacher_ev: dict, eval_seeds: int,
+                      student_label: str = "학생") -> list:
+    """I8(2026-09-22 최종 리뷰): 이 절 제목·표 헤더·"서로 다른 판 수" 줄이 전부 `"M4a"` 로
+
+    하드코딩돼 있어 M4b(또는 그 뒤) 성적표에도 "M4a 학생" 이 찍혔다. `student_label` 을 받아
+    채점 대상 실행을 가리키는 라벨을 호출부(`--student-label`)가 정하게 한다.
+    """
+    lines = ["", f"## 비교 — M3 학생 · {student_label} · 선생님", "",
+             f"| 단계 | 지표 | M3 학생 | {student_label} | 선생님 |", "|---|---|---:|---:|---:|"]
     for i, label in enumerate(stage_labels, start=1):
         tag = f"단계{_circled(i)}"
         lines.append(f"| {tag} | 완주율 | {_fmt_pct(m3_ev[label]['goal_rate'])} | "
@@ -317,12 +332,13 @@ def _comparison_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teacher_ev:
         note = ("(액터·신호가 고정이라 시드가 달라도 같은 판이 되기 쉽다)" if label == STAGE1_LABEL
                 else "(신호 주기 위상이 시드마다 달라 실제로 다른 판이 나올 수 있다)")
         lines.append(f"- 단계{_circled(i)}: M3 {_distinct_episodes(m3_ev[label])}/{n}, "
-                     f"M4a {_distinct_episodes(m4a_ev[label])}/{n}, "
+                     f"{student_label} {_distinct_episodes(m4a_ev[label])}/{n}, "
                      f"선생님 {_distinct_episodes(teacher_ev[label])}/{n} {note}")
     return lines
 
 
-def _violation_table_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teacher_ev: dict) -> list:
+def _violation_table_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teacher_ev: dict,
+                           student_label: str = "학생") -> list:
     """항목별 표 — 마지막에 **중대 합계** 행을 더한다(M3·학생·선생님 각각).
 
     항목별 행은 진단용이라(어느 항목이 문제인지 보려는 것) 판을 전부 쓰지만, 합계 행은
@@ -330,6 +346,9 @@ def _violation_table_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teache
     `major_total(violation_counts(completed_only(ev)))` 순서를 쓴다 — `completed_only` 를
     빼면 조기 종료한 판이 중대를 덜(또는, 도달한 구간에 중대가 더 있으면 많이) 잡혀 합계
     행이 목표 판정과 다른 숫자를 보이게 된다.
+
+    `student_label` 은 `_comparison_lines` 와 같은 이유(I8) — 열 이름이 `"M4a minor"`/
+    `"M4a major"` 로 하드코딩돼 있었다.
     """
     lines = []
     for i, label in enumerate(stage_labels, start=1):
@@ -338,7 +357,8 @@ def _violation_table_lines(stage_labels: list, m3_ev: dict, m4a_ev: dict, teache
         sc_t = violation_counts(teacher_ev[label])
         items = sorted(set(sc_m3) | set(sc_m4a) | set(sc_t))
         lines += ["", f"### 단계{_circled(i)} — 항목별 위반(구간-슬롯 수)", "",
-                  "| 항목 | M3 minor | M3 major | M4a minor | M4a major | 선생님 minor | 선생님 major |",
+                  f"| 항목 | M3 minor | M3 major | {student_label} minor | {student_label} major |"
+                  " 선생님 minor | 선생님 major |",
                   "|---|---:|---:|---:|---:|---:|---:|"]
         if not items:
             lines.append("| (위반 없음) | 0 | 0 | 0 | 0 | 0 | 0 |")
@@ -385,7 +405,10 @@ def _goal_lines(m4a_ev: dict, teacher_ev: dict, major_totals: dict, rows: list, 
 
     lines = ["", "## 목표 판정", "", head, ""]
     lines += [f"- **{v.name}** — {v.line}" for v in real]
-    if any(v.ok for v in verdicts):
+    # I9(2026-09-22 최종 리뷰): `verdicts` 전체로 걸면 precondition=True 인 두 줄만 통과해도
+    # caveat 가 뜬다 — "실질 판정 2 줄 중 0 줄 달성" 바로 밑에 "위 **달성**이..." 가 찍히는
+    # 자기모순이 실제 성적표에 나왔다. `real`(precondition=False) 만 보고 판단해야 한다.
+    if any(v.ok for v in real):
         caveat = _best_step_caveat(rows, best_step)
         if caveat:
             lines.append(f"  - ⚠️ {caveat}")
@@ -482,6 +505,10 @@ def main():
     ap.add_argument("--title", default="M4a 성적표 — PPO",
                     help="성적표 맨 위 제목(h1) — 기본값은 지금까지의 'M4a 성적표 — PPO' 그대로다"
                         "(리뷰 Minor: M4b 성적표를 만들 땐 --title 'M4b 성적표 — PPO' 로 넘겨라)")
+    ap.add_argument("--student-label", default="학생",
+                    help="비교 표·항목별 표에서 채점 대상 실행을 가리키는 열 이름(기본 '학생')"
+                        "(2026-09-22 최종 리뷰 I8: 'M4a 학생'/'M4a minor' 가 하드코딩돼 있어 M4b"
+                        " 이후 성적표에도 M4a 라벨이 찍혔다)")
     a = ap.parse_args()
     if not a.skip_eval and not a.m3:
         ap.error("--skip-eval 이 아니면 --m3(비교할 M3 체크포인트)가 필요하다")
@@ -573,8 +600,10 @@ def main():
                   "`--skip-eval` 이라 위반 집계가 없다 — 항목별 표의 **중대 합계** 행도 낼 수 없다"
                   "(그 값은 실제로 정책을 몰아 봐야 나온다)."]
     else:
-        lines += _comparison_lines(stage_labels, m3_ev, m4a_ev, teacher_ev, a.eval_seeds)
-        lines += _violation_table_lines(stage_labels, m3_ev, m4a_ev, teacher_ev)
+        lines += _comparison_lines(stage_labels, m3_ev, m4a_ev, teacher_ev, a.eval_seeds,
+                                   student_label=a.student_label)
+        lines += _violation_table_lines(stage_labels, m3_ev, m4a_ev, teacher_ev,
+                                        student_label=a.student_label)
         major_totals = {label: major_total(violation_counts(completed_only(ev)))
                         for label, ev in m4a_ev.items()}
         lines += _goal_lines(m4a_ev, teacher_ev, major_totals, primary_rows, best_steps[a.run],
@@ -584,14 +613,11 @@ def main():
 
     lines += _notes_lines(a.notes)
 
-    lines += ["", "## M4b 로 미루는 것", "",
-              "- 커리큘럼 단계 ③④⑤(사물·정지차 / 보행자·교통 / 연습코스 전체)와 자동 진급 — 액터가"
-              " 있는 판을 만들어야 한다(M2a 의 시나리오 도구를 쓴다).",
-              "- 두 머신 운용의 나머지(두 머신에서 동시에 다른 설정을 돌리고 결과를 모으기, `nice` 규칙).",
-              "- 스텝 예산 계획과 하이퍼파라미터 탐색(엔트로피 계수·클립·롤아웃 길이) — 이 성적표의"
-              " 실행 비교 표가 그 탐색의 첫 결과다.",
-              "- 같은 시드에서 같은 학습 곡선이 나오는지(학습 반복 재현성) 확인.",
-              "", "산출물(로그·체크포인트)은 `runs/` 아래에 있고 레포에는 넣지 않는다."]
+    # I8(2026-09-22 최종 리뷰): 다음 마일스톤으로 넘긴 항목을 알리는 고정 절을 여기 박아
+    # 뒀었다 — 마일스톤마다 그 목록이 달라지는데 생성기에 고정하면 다음 성적표에서 거짓말이
+    # 된다(실제로 이 절과 `--notes` 가 서로 다른 다음 마일스톤을 가리켜 정면으로 부딪혔다).
+    # 그 내용은 `--notes` 가 말할 몫이지 생성기가 고정할 몫이 아니다 — 지웠다.
+    lines += ["", "산출물(로그·체크포인트)은 `runs/` 아래에 있고 레포에는 넣지 않는다."]
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w", encoding="utf-8") as f:
